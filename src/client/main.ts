@@ -133,10 +133,8 @@ function viewer(parent: HTMLElement, fileId: string): void {
   }).catch(e => { status.textContent = e instanceof Error ? e.message : 'Preview unavailable'; });
 }
 
-function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview, { kind: 'mesh' }>): void {
-  const ctx = canvas.getContext('2d'); if (!ctx) return;
+function meshPainter(preview: Extract<Preview, { kind: 'mesh' }>) {
   const points = preview.vertices;
-  if (!points.length) return;
   // Large STL previews can contain 150k distinct vertex records. Avoid
   // Math.min(...vertices), which overflows browser argument limits at this size.
   const minimum = [Infinity, Infinity, Infinity];
@@ -149,14 +147,12 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
   }
   const center = minimum.map((value, axis) => (value + maximum[axis]) / 2);
   const span = Math.max(1e-6, ...minimum.map((value, axis) => maximum[axis] - value));
-  let yaw = 0.8, pitch = -0.45, zoom = 1.0, drag = false, lastX = 0, lastY = 0;
-  let frame = 0, wheelSettled = 0;
-  const render = (interactive: boolean): void => {
-    const box = canvas.getBoundingClientRect();
-    const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
-    const w = canvas.width = Math.max(240, Math.round(box.width * pixelRatio));
-    const h = canvas.height = Math.max(160, Math.round(box.height * pixelRatio));
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
+  return (ctx: CanvasRenderingContext2D, w: number, h: number, yaw: number, pitch: number,
+          zoom: number, interactive: boolean, pixelRatio: number, report = false): void => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = report ? '#f7f8fb' : '#15191f';
+    ctx.fillRect(0, 0, w, h);
+    if (!points.length) return;
     const cosYaw = Math.cos(yaw), sinYaw = Math.sin(yaw), cosPitch = Math.cos(pitch), sinPitch = Math.sin(pitch);
     const screen = new Float32Array(points.length * 3);
     const scale = Math.min(w, h) * zoom;
@@ -169,8 +165,6 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
       screen[offset + 1] = h / 2 - (cosPitch * y - sinPitch * zr) * scale;
       screen[offset + 2] = sinPitch * y + cosPitch * zr;
     }
-    // Full geometry is shown when stationary. During orbit/zoom, use an
-    // evenly distributed face subset so 50k Canvas2D paths cannot stall input.
     const stride = interactive ? Math.max(1, Math.ceil(preview.faces.length / 8_000)) : 1;
     const sorted: Array<{ index: number; z: number }> = [];
     for (let index = 0; index < preview.faces.length; index += stride) {
@@ -186,10 +180,49 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
       const cx = screen[c * 3], cy = screen[c * 3 + 1];
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.closePath();
       const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-      ctx.fillStyle = cross >= 0 ? 'rgba(214,179,0,.55)' : 'rgba(130,148,170,.60)';
+      ctx.fillStyle = cross >= 0 ? 'rgba(214,179,0,.65)' : 'rgba(130,148,170,.70)';
       ctx.fill();
-      if (!interactive) { ctx.strokeStyle = 'rgba(6,12,22,.26)'; ctx.stroke(); }
+      if (!interactive) { ctx.strokeStyle = report ? 'rgba(6,12,22,.24)' : 'rgba(6,12,22,.26)'; ctx.stroke(); }
     }
+  };
+}
+
+async function captureModelPreview(fileId: string): Promise<Blob> {
+  const preview = await api.get<Preview>(`/files/${fileId}/geometry`);
+  const canvas = document.createElement('canvas');
+  canvas.width = 1600; canvas.height = 900;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('This browser cannot render PNG report previews');
+  if (preview.kind === 'mesh') {
+    meshPainter(preview)(ctx, canvas.width, canvas.height, .8, -.45, 1.35, false, 1, true);
+  } else {
+    ctx.fillStyle = '#f7f8fb'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const image = new Image();
+    const url = URL.createObjectURL(new Blob([preview.markup], { type: 'image/svg+xml' }));
+    try {
+      image.src = url;
+      await image.decode();
+      const scale = Math.min(1440 / image.naturalWidth, 810 / image.naturalHeight);
+      if (!Number.isFinite(scale) || scale <= 0) throw new Error('Drawing preview has invalid dimensions');
+      const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+      ctx.drawImage(image, (1600 - w) / 2, (900 - h) / 2, w, h);
+    } finally { URL.revokeObjectURL(url); }
+  }
+  return await new Promise<Blob>((resolve, reject) => canvas.toBlob(
+    blob => blob ? resolve(blob) : reject(new Error('Failed to capture the model preview')), 'image/png'));
+}
+
+function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview, { kind: 'mesh' }>): void {
+  const ctx = canvas.getContext('2d'); if (!ctx) return;
+  const paint = meshPainter(preview);
+  let yaw = 0.8, pitch = -0.45, zoom = 1.0, drag = false, lastX = 0, lastY = 0;
+  let frame = 0, wheelSettled = 0;
+  const render = (interactive: boolean): void => {
+    const box = canvas.getBoundingClientRect();
+    const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+    const w = canvas.width = Math.max(240, Math.round(box.width * pixelRatio));
+    const h = canvas.height = Math.max(160, Math.round(box.height * pixelRatio));
+    paint(ctx, w, h, yaw, pitch, zoom, interactive, pixelRatio);
   };
   const schedule = (interactive: boolean): void => {
     if (frame) window.cancelAnimationFrame(frame);
@@ -295,12 +328,45 @@ function analysisPage(main: HTMLElement): void {
   panel.append(chosen, declaredUnit(), button('Run analysis', () => {
     if (!chosen.value) { notice('Choose a file first', true); return; }
     void action(async () => {
-      const result = await api.post<{ id: string; report: Analysis }>('/analyze', { id: chosen.value, unit: assumedUnit });
+      const fileId = chosen.value;
+      output.replaceChildren(el('div', 'notice', 'Analyzing geometry and preparing the report…'));
+      const result = await api.post<{ id: string; report: Analysis; filenames: { json: string; sldc: string } }>(
+        '/analyze', { id: fileId, unit: assumedUnit });
       output.replaceChildren(); resultBlock(output, result.report);
       const actions = el('div', 'file-toolbar');
-      actions.append(button('Export JSON', () => { void api.download(`/reports/${result.id}?format=json`, 'cadcon-analysis.json'); }, 'btn-outline'));
-      actions.append(button('Export SLDC', () => { void api.download(`/reports/${result.id}?format=sldc`, 'cadcon-analysis.sldc'); }, 'btn-primary'));
+      actions.append(button('Export JSON', () => {
+        void api.download(`/reports/${result.id}?format=json`, result.filenames.json).catch(e => notice(e.message, true));
+      }, 'btn-outline'));
+      const sldcButton = button('Export SLDC', () => {
+        void api.download(`/reports/${result.id}?format=sldc`, result.filenames.sldc).catch(e => notice(e.message, true));
+      }, 'btn-primary');
+      sldcButton.disabled = true;
+      actions.append(sldcButton);
       output.prepend(actions);
+      const previewStatus = el('p', 'muted', 'Rendering the actual model preview for the SLDC cover…');
+      actions.after(previewStatus);
+      const prepare = async (): Promise<void> => {
+        const picture = await captureModelPreview(fileId);
+        await api.postBlob(`/reports/${result.id}/preview?source_id=${encodeURIComponent(fileId)}`, picture);
+        const triangles = Number(result.report.geometry_summary.triangles || 0);
+        previewStatus.textContent = triangles > 50_000
+          ? 'Model PNG embedded. The cover preview uses at most 50,000 triangles; geometric analysis uses the full model.'
+          : 'Model PNG embedded for native SLDC export.';
+        sldcButton.disabled = false;
+      };
+      try { await prepare(); }
+      catch (error) {
+        previewStatus.textContent = `Model screenshot unavailable: ${error instanceof Error ? error.message : String(error)}. JSON export remains available.`;
+        previewStatus.classList.add('notice', 'warning');
+        const retry = button('Retry screenshot', () => {
+          void action(async () => {
+            retry.disabled = true;
+            try { await prepare(); retry.remove(); previewStatus.classList.remove('notice', 'warning'); }
+            finally { retry.disabled = false; }
+          });
+        }, 'btn-outline');
+        previewStatus.after(retry);
+      }
     });
   }, 'btn-primary'), output); main.append(panel);
   const spatial = card('SLAI Spatial queries');

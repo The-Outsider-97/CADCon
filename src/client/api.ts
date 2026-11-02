@@ -25,6 +25,16 @@ export class Api {
     if (!res.ok || !payload.ok || !payload.data) throw new Error(payload.error?.message || 'Upload failed');
     return payload.data;
   }
+  async postBlob<T>(path: string, blob: Blob): Promise<T> {
+    const res = await fetch('/api' + path, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'X-SLAI-Cadcon': '1', 'Content-Type': blob.type || 'application/octet-stream' },
+      body: blob,
+    });
+    const payload = await res.json() as { ok: boolean; data?: T; error?: { message?: string } };
+    if (!res.ok || !payload.ok || !payload.data) throw new Error(payload.error?.message || 'Image upload failed');
+    return payload.data;
+  }
   async download(path: string, name: string): Promise<void> {
     const res = await fetch('/api' + path, { credentials: 'same-origin' });
     if (!res.ok) throw new Error('Download failed');

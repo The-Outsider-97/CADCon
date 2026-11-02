@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import os
 import secrets
+import struct
 import sys
 import threading
 import uuid
@@ -43,6 +45,8 @@ class CADCon:
         self.original_names: dict[str, str] = {}
         self.outputs: dict[str, Path] = {}
         self.reports: dict[str, dict[str, Any]] = {}
+        self.report_sources: dict[str, str] = {}
+        self.report_previews: dict[str, bytes] = {}
         self.lock = threading.RLock()
 
     def get_file(self, identity: str) -> Path:
@@ -58,6 +62,7 @@ def build_router():
     from applications.tools.errors import BadRequest, LimitExceeded, NotFound
     from applications.tools.server import Router, Response, file_response
     from applications.tools.storage import atomic_write
+    from src.utils.sldc import SLDCError
     from src.utils.spatial_formats.common.errors import SpatialFormatError
     module = importlib.import_module(f"{__package__}.engine" if __package__ else "engine")
     router = Router()
@@ -69,6 +74,8 @@ def build_router():
             raise BadRequest(str(exc)) from exc
         except SpatialFormatError as exc:
             raise BadRequest(str(exc)) from exc
+        except SLDCError as exc:
+            raise BadRequest(f"The native SLDC report is invalid: {exc}") from exc
         except FileExistsError as exc:
             raise BadRequest("An output file with that name already exists") from exc
         except ImportError as exc:
@@ -168,7 +175,48 @@ def build_router():
         identity = uuid.uuid4().hex
         with app.lock:
             app.reports[identity] = report
-        return {"id": identity, "report": report}
+            app.report_sources[identity] = str(data.get("id"))
+        return {"id": identity, "report": report,
+                "filenames": {fmt: module.report_filename(report, fmt) for fmt in ("json", "sldc")}}
+
+    @router.route("POST", "/api/reports/{id}/preview")
+    def report_preview(app, req):
+        from src.utils import sldc
+        identity = req.params["id"]
+        source_id = req.str_query("source_id")
+        with app.lock:
+            expected_source_id = app.report_sources.get(identity)
+        if not expected_source_id:
+            raise NotFound("Unknown geometry analysis report")
+        if source_id != expected_source_id:
+            raise BadRequest("The screenshot is not associated with this report's source model")
+        if not req.length or not 0 < req.length <= 8 * 1024 * 1024:
+            raise LimitExceeded("PNG preview must be between 1 byte and 8 MiB")
+        image = req.stream.read(req.length) if req.stream else b""
+        req._read = True
+        if (len(image) != req.length or len(image) < 45 or
+                image[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" or
+                image[-12:] != b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+            raise BadRequest("Report preview must be a valid PNG image")
+        width, height = struct.unpack(">II", image[16:24])
+        if not 0 < width <= 4096 or not 0 < height <= 4096:
+            raise BadRequest("Preview dimensions exceed the supported 4096 pixel limit")
+        try:
+            sldc.make_asset(image)  # Authoritative SLDC image validation.
+        except sldc.SLDCError as exc:
+            raise BadRequest(f"The model preview is invalid: {exc}") from exc
+        with app.lock:
+            if app.report_sources.get(identity) != source_id:
+                raise BadRequest("The report was replaced during preview generation")
+            app.report_previews[identity] = image
+            triangle_count = app.reports[identity].get("geometry_summary", {}).get("triangles")
+            app.reports[identity]["preview"] = {"format": "png", "width": width, "height": height,
+                                                 "sha256": hashlib.sha256(image).hexdigest(),
+                                                 "renderer": "CADCon geometry viewer",
+                                                 "preview_triangle_limit": module.PREVIEW_TRIANGLE_LIMIT,
+                                                 "partial": (triangle_count > module.PREVIEW_TRIANGLE_LIMIT
+                                                             if isinstance(triangle_count, int) else False)}
+        return {"attached": True, "width": width, "height": height}
 
     @router.route("POST", "/api/compare")
     def compare(app, req):
@@ -222,11 +270,15 @@ def build_router():
     def report(app, req):
         with app.lock:
             data = app.reports.get(req.params["id"])
+            preview = app.report_previews.get(req.params["id"])
         if data is None:
             raise NotFound("Report not available")
         fmt = req.str_query("format", "json")
-        payload = run(module.report_bytes, data, fmt)
-        return file_response(payload, "cadcon-analysis." + fmt, "application/octet-stream")
+        if fmt == "sldc" and data.get("report_kind") == "cadcon.analysis" and preview is None:
+            raise BadRequest("Generate the model preview before exporting the native SLDC report")
+        payload = run(module.report_bytes, data, fmt, preview_png=preview)
+        content_type = "application/x-slai-sldc+zip" if fmt == "sldc" else "application/json"
+        return file_response(payload, module.report_filename(data, fmt), content_type)
 
     return router
 

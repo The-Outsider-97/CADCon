@@ -3,11 +3,22 @@ from __future__ import annotations
 
 import json
 import struct
+import zlib
 from pathlib import Path
 
 import pytest
 
 import engine
+
+
+def _png_bytes(width: int = 3, height: int = 2) -> bytes:
+    def chunk(kind: bytes, content: bytes) -> bytes:
+        return (struct.pack(">I", len(content)) + kind + content
+                + struct.pack(">I", zlib.crc32(kind + content) & 0xFFFFFFFF))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    pixels = (b"\x00" + bytes([216, 180, 0]) * width) * height
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b"")
 
 
 def test_single_triangle_counts(tmp_path: Path) -> None:
@@ -92,8 +103,49 @@ def test_sldc_report_roundtrip(tmp_path: Path) -> None:
     sldc = pytest.importorskip("src.utils.sldc")
     source = tmp_path / "a.obj"
     source.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
-    content = engine.report_bytes(engine.analysis(source), "sldc")
-    assert sldc.loads_package(content).document["title"] == "CADCon Geometry Analysis"
+    report = engine.analysis(source)
+    content = engine.report_bytes(report, "sldc", preview_png=_png_bytes())
+    package = sldc.loads_package(content)
+    assert package.version == "1.1.0"
+    assert package.document["title"] == "CADCon Geometry Analysis a"
+    assert len(package.assets) == 1
+    blocks = package.document["blocks"]
+    assert any(block["type"] == "figure" and block["section"] == "cadcon-cover" for block in blocks)
+    headings = [block["text"] for block in blocks if block["type"] == "heading"]
+    assert headings == ["Geometry Summary", "Validation Coverage", "Findings", "Provenance"]
+    assert all(block["attributes"]["page_break_before"] for block in blocks if block["type"] == "heading")
+    assert package.document["styles"]["paragraph"]["report_heading"]["keep_with_next"] is True
+    toc = [block for block in blocks if "slai.sldc.toc" in block.get("extensions", {})]
+    assert len(toc) == len(headings) + 1
+    assert toc[0]["extensions"]["slai.sldc.toc"]["role"] == "title"
+    assert [b["text"] for b in toc[1:]] == headings
+    assert report["source"]["sha256"] == package.document["metadata"]["source_sha256"]
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("hinge.sgeo", "cadcon-analysis-hinge.sldc"),
+    ("Gear-box-bottom.stl", "cadcon-analysis-Gear-box-bottom.sldc"),
+    ("Assembly.final.glb", "cadcon-analysis-Assembly.final.sldc"),
+    ("folder\\My bracket.stl", "cadcon-analysis-My bracket.sldc"),
+    ("C:/parts/café.stl", "cadcon-analysis-cafe.sldc"),
+    ("../...stl", "cadcon-analysis-model.sldc"),
+])
+def test_sldc_filename_uses_original_model_name(model: str, expected: str) -> None:
+    data = {"report_kind": "cadcon.analysis", "source": {"name": model}}
+    assert engine.report_filename(data, "sldc") == expected
+    assert engine.report_filename(data, "json") == expected.removesuffix("sldc") + "json"
+
+
+def test_sldc_conditional_ai_section(tmp_path: Path) -> None:
+    sldc = pytest.importorskip("src.utils.sldc")
+    source = tmp_path / "part.obj"
+    source.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+    report = engine.analysis(source)
+    report["ai_analysis"] = {"agent": "SLAI Spatial", "evidence": ["cadcon.mesh.open_boundaries"],
+                             "summary": "This mesh has an open boundary.", "limitations": "No self-intersection test"}
+    package = sldc.loads_package(engine.report_bytes(report, "sldc", preview_png=_png_bytes()))
+    headings = [block["text"] for block in package.document["blocks"] if block["type"] == "heading"]
+    assert headings[-1] == "AI Analysis"
 
 
 def test_native_sgeo_and_glb_conversion(tmp_path: Path) -> None:
@@ -107,6 +159,46 @@ def test_native_sgeo_and_glb_conversion(tmp_path: Path) -> None:
     glb = tmp_path / "square.glb"
     assert engine.convert(native, glb)["validated"]
     assert glb.stat().st_size > 0
+
+
+def test_stl_to_sgeo_uses_shared_storage_instead_of_native_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sgeo = pytest.importorskip("src.utils.sgeo")
+    source = tmp_path / "triangle.stl"
+    facet = struct.pack("<12fH", 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0)
+    source.write_bytes(b"CADCon".ljust(80, b" ") + struct.pack("<I", 1) + facet)
+    destination = tmp_path / "triangle.sgeo"
+
+    def unavailable_native_writer(*_args: object, **_kwargs: object) -> None:
+        raise OSError("filesystem does not support atomic no-clobber publication")
+
+    monkeypatch.setattr(sgeo.SGEODocument, "save", unavailable_native_writer)
+    result = engine.convert(source, destination, unit="mm")
+    assert result["validated"] is True
+    assert sgeo.SGEODocument.open(destination).count() == 1
+
+
+def test_sgeo_export_survives_windows_rename_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sgeo = pytest.importorskip("src.utils.sgeo")
+    from applications.tools import storage
+
+    source = tmp_path / "triangle.obj"
+    source.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+    destination = tmp_path / "triangle.sgeo"
+
+    def rejected_rename(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("WinError 5: Access denied")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "_RETRIES", 1)
+        patch.setattr(storage.os, "replace", rejected_rename)
+        result = engine.convert(source, destination)
+
+    assert result["validated"] is True
+    assert sgeo.SGEODocument.open(destination).count() == 1
 
 
 def test_native_unit_scaling_to_unitless_stl_and_obj(tmp_path: Path) -> None:
@@ -171,6 +263,23 @@ def test_svg_sdrw_dxf_roundtrip(tmp_path: Path) -> None:
     assert result["geometry_summary"]["entities"] == 1
     dxf = tmp_path / "line.dxf"
     assert engine.convert(drawing, dxf)["validated"]
+
+
+def test_sdrw_export_uses_shared_storage_instead_of_native_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdrw = pytest.importorskip("src.utils.sdrw")
+    source = tmp_path / "line.svg"
+    source.write_text('<svg xmlns="http://www.w3.org/2000/svg"><line x1="0" y1="0" x2="10" y2="20"/></svg>', encoding="utf-8")
+    destination = tmp_path / "line.sdrw"
+
+    def unavailable_native_writer(*_args: object, **_kwargs: object) -> None:
+        raise OSError("filesystem does not support atomic no-clobber publication")
+
+    monkeypatch.setattr(sdrw.SDRWDocument, "save", unavailable_native_writer)
+    result = engine.convert(source, destination)
+    assert result["validated"] is True
+    assert engine.inspect(destination)["geometry_summary"]["entities"] == 1
 
 
 def test_comparison_report_sldc(tmp_path: Path) -> None:

@@ -52,6 +52,13 @@ truth for CADCon-specific features.
 - Findings with stable topology codes, counts, evidence, and explicitly listed
   checks that were not performed. Opt-in nearest-entity queries call SLAI's
   Spatial subsystem, not a replacement geometry model.
+- Analysis downloads use the original model stem, e.g.
+  `cadcon-analysis-hinge.sldc` / `cadcon-analysis-hinge.json`. The native SLDC
+  report uses a cover with an embedded PNG rendered from CADCon's actual model
+  preview, a managed table of contents, semantic chapters, structured tables,
+  and page-break/keep-with-next metadata. SLAI's SLDC 1.1 serializer is the
+  sole owner of the package and image assets; browser capture must complete
+  before the SLDC export button is enabled.
 
 ## Verified and conditional format matrix
 
@@ -104,6 +111,11 @@ because it would lose precision, metadata or semantics.
   using native SGEO/SDRW agent DTOs. The top-level multi-agent orchestrator and
   remaining Language/Reasoning/Quality agents are not yet connected; System
   explicitly reports this incomplete state.
+- The AI Analysis report chapter is omitted unless a verified, evidence-linked
+  agent result is present. No AI prose is simulated. The cover PNG may use a
+  50,000-triangle subset for large sources, while all numeric analysis uses the
+  complete model. The PDF/SLDC editor layout depends on the installed SLAI
+  document renderer honoring native page breaks and keep-with-next styles.
 - Batch conversion, job persistence, advanced geometry measurement and complete
   animation/assembly semantics remain development work.
 - The side-by-side compare previews are individually navigable; synchronized

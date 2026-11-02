@@ -9,8 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 import time
+import unicodedata
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -557,30 +560,63 @@ def spatial_nearest(path: Path, point_m: list[float], *, unit: str = "mm") -> di
             "meaning": "Nearest spatial-entity centre; not distance to the exact solid surface"}
 
 
-def report_bytes(data: dict[str, Any], fmt: str) -> bytes:
+def report_filename(data: dict[str, Any], fmt: str) -> str:
+    """Download names are derived from the original upload, never its UUID path."""
+    if fmt not in {"json", "sldc"}:
+        raise GeometryError("Report format must be JSON or SLDC")
+    if data.get("report_kind") == "cadcon.comparison":
+        return f"cadcon-comparison.{fmt}"
+    name = str((data.get("source") or {}).get("name") or "model")
+    stem = Path(name.replace("\\", "/").rsplit("/", 1)[-1]).stem
+    # The shared SLAI server also applies an ASCII-safe Content-Disposition
+    # fallback. Keep the HTTP name and the browser's downloaded name identical.
+    normalized = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
+    safe = re.sub(r"[^A-Za-z0-9._ -]", "_", normalized).strip(" ._")[:96].rstrip(" ._")
+    return f"cadcon-analysis-{safe or 'model'}.{fmt}"
+
+
+def _report_value(item: Any) -> str:
+    if item is None:
+        return "Not available"
+    if isinstance(item, bool):
+        return "Yes" if item else "No"
+    if isinstance(item, (dict, list, tuple)):
+        return json.dumps(item, ensure_ascii=False, allow_nan=False)
+    if isinstance(item, float):
+        return f"{item:.10g}"
+    return str(item)
+
+
+def _report_time(value: str) -> str:
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            raise ValueError("A timezone is required")
+        return f"{stamp.day} {stamp.strftime('%B %Y, %H:%M %Z')}".strip()
+    except (TypeError, ValueError, AttributeError):
+        return value
+
+
+def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = None) -> bytes:
     if fmt == "json":
         return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     if fmt != "sldc":
         raise GeometryError("Report format must be JSON or SLDC")
     from src.utils import sldc
     is_comparison = data.get("report_kind") == "cadcon.comparison"
-    title = "CADCon Model Comparison" if is_comparison else "CADCon Geometry Analysis"
+    model_name = Path(str((data.get("source") or {}).get("name", "model")).replace("\\", "/")).stem or "model"
+    title = "CADCon Model Comparison" if is_comparison else f"CADCon Geometry Analysis {model_name}"
     generated = data.get("generated_at") or datetime.now(timezone.utc).isoformat()
-    blocks = sldc.blocks_from_text(f"# {title}\n\nCADCon v1.0 · Generated {generated}\n", markdown=True)
-
-    def value(item) -> str:
-        if item is None:
-            return "Not available"
-        if isinstance(item, (dict, list, tuple)):
-            return json.dumps(item, ensure_ascii=False, allow_nan=False)
-        return str(item)
-
-    def section(name: str, values: dict[str, Any]) -> None:
-        blocks.extend(sldc.blocks_from_text("## " + name, markdown=True))
-        rows = [["Metric", "Value"]] + [[key.replace("_", " ").capitalize(), value(item)] for key, item in values.items()]
-        blocks.append(sldc.make_table(rows, header_rows=1, caption=name))
-
     if is_comparison:
+        # Keep the existing comparison report contract independent of the new
+        # geometry-analysis template.
+        blocks = sldc.blocks_from_text(f"# {title}\n\nCADCon v1.0 · Generated {generated}\n", markdown=True)
+        def section(name: str, values: dict[str, Any]) -> None:
+            blocks.extend(sldc.blocks_from_text("## " + name, markdown=True))
+            rows = [["Metric", "Value"]] + [[key.replace("_", " ").capitalize(), _report_value(item)]
+                                             for key, item in values.items()]
+            blocks.append(sldc.make_table(rows, header_rows=1, caption=name))
+
         section("Overview", {"status": data.get("status"), "tolerance": data.get("tolerance"),
                              "limitations": data.get("note") or data.get("reason")})
         for key in ("left", "right"):
@@ -588,22 +624,170 @@ def report_bytes(data: dict[str, Any], fmt: str) -> bytes:
             section(key.title() + " file", source.get("source", {}))
             section(key.title() + " geometry", source.get("geometry_summary", {}))
         differences = data.get("differences") or {}
-        section("Differences", {key: f"{value(pair.get('left'))} → {value(pair.get('right'))}"
+        section("Differences", {key: f"{_report_value(pair.get('left'))} → {_report_value(pair.get('right'))}"
                                 for key, pair in differences.items()})
+        for block in blocks:
+            block.pop("id", None)
+        return sldc.dumps_package(sldc.new_package(title, blocks))
+
+    # Native SLDC 1.1 sections/TOC/figure assets; keep all text editable.
+    asset = sldc.make_asset(preview_png) if preview_png else None
+    styles = {"paragraph": {
+        "cover_title": {"font_size_pt": 23, "bold": True, "align": "center", "space_after_pt": 14},
+        "cover_subtitle": {"font_size_pt": 11, "align": "center", "space_after_pt": 18},
+        "cover_detail": {"font_size_pt": 10, "align": "center", "space_after_pt": 7},
+        "toc_title": {"font_size_pt": 17, "bold": True, "space_after_pt": 13},
+        "toc_entry": {"font_size_pt": 11, "space_after_pt": 7},
+        "report_heading": {"font_size_pt": 16, "bold": True, "space_after_pt": 9,
+                           "keep_with_next": True},
+        "report_body": {"font_size_pt": 10, "space_after_pt": 6},
+    }}
+    page = {"size": "A4", "margins_mm": {"top": 18, "right": 19, "bottom": 18, "left": 19}}
+    sections = [
+        {"id": "cadcon-cover", "role": "cover", "page": page, "numbering": {"show": False}},
+        {"id": "cadcon-contents", "role": "front_matter", "page": page,
+         "numbering": {"show": False}},
+        {"id": "cadcon-body", "role": "body", "page": page,
+         "footer": {"right": "Page {page}"}, "numbering": {"start": 1, "show": True}},
+    ]
+    blocks = [
+        sldc.make_block("paragraph", title, section="cadcon-cover", style="cover_title"),
+        sldc.make_block("paragraph", f"CADCon v1.0 · Generated {_report_time(generated)}",
+                        section="cadcon-cover", style="cover_subtitle"),
+    ]
+    if asset is not None:
+        blocks.append(sldc.make_figure(asset, alt=f"Model preview of {model_name}",
+                                       width_mm=165, align="center"))
+        blocks[-1]["section"] = "cadcon-cover"
+    source = data.get("source") or {}
+    blocks.append(sldc.make_block("paragraph", f"Source: {source.get('name', 'Unknown')} · "
+                                   f"{str(source.get('format', 'unknown')).upper()}",
+                                   section="cadcon-cover", style="cover_detail"))
+    unit = (data.get("geometry_summary") or {}).get("unit")
+    if unit:
+        blocks.append(sldc.make_block("paragraph", f"Units: {unit}",
+                                      section="cadcon-cover", style="cover_detail"))
+
+    headings: list[tuple[str, str]] = []
+    chapters: list[dict[str, Any]] = []
+
+    def chapter(name: str) -> None:
+        heading = sldc.make_block("heading", name, block_id=sldc.new_block_id(),
+                                  attributes={"level": 1, "page_break_before": True},
+                                  section="cadcon-body", style="report_heading")
+        headings.append((name, heading["id"]))
+        chapters.append(heading)
+
+    def table(rows: list[list[str]], headings: list[str] | None = None) -> None:
+        block = sldc.make_table([headings or ["Metric", "Value"], *rows], header_rows=1)
+        block["section"] = "cadcon-body"
+        chapters.append(block)
+
+    geometry = data.get("geometry_summary") or {}
+    chapter("Geometry Summary")
+    geometry_rows = [
+        ["Source file", str(source.get("name", "Unknown"))],
+        ["Source format", str(source.get("format", "Unknown")).upper()],
+    ]
+    for key, value in geometry.items():
+        label = key.replace("_", " ").capitalize()
+        if key == "bounds" and isinstance(value, dict):
+            for edge in ("min", "max"):
+                if edge in value:
+                    geometry_rows.append([f"Bounds {edge.upper()} ({unit or 'unknown units'})",
+                                          ", ".join(_report_value(n) for n in value[edge])])
+            if isinstance(value.get("min"), list) and isinstance(value.get("max"), list):
+                low, high = value["min"], value["max"]
+                if len(low) == len(high) == 3:
+                    for axis, lower, upper in zip("XYZ", low, high):
+                        geometry_rows.append([f"{axis} extent ({unit or 'unknown units'})",
+                                              _report_value(upper - lower)])
+        elif key in {"surface_area", "volume"} and value is not None and unit:
+            geometry_rows.append([f"{label} ({unit}{'²' if key == 'surface_area' else '³'})",
+                                  _report_value(value)])
+        elif key == "warnings" and isinstance(value, list):
+            geometry_rows.append(["Warnings", "; ".join(map(str, value)) or "None"])
+        else:
+            geometry_rows.append([label, _report_value(value)])
+    table(geometry_rows)
+
+    chapter("Validation Coverage")
+    validation = data.get("validation") or {}
+    validation_rows = []
+    for name in validation.get("executed", []):
+        description = {"indexed-edge-incidence": "Boundary and non-manifold edges were counted",
+                       "degenerate-triangle-area": "Degenerate faces were counted",
+                       "finite-coordinates": "Imported coordinates were validated",
+                       "drawing-entity-extraction": "2D entities were extracted"}.get(name, "Check executed")
+        validation_rows.append([name.replace("-", " ").capitalize(), "Executed", "Completed", description])
+    for name in validation.get("not_executed", []):
+        validation_rows.append([name.replace("-", " ").capitalize(), "Not executed", "Unknown",
+                                "No verified result is available"])
+    table(validation_rows or [["Coverage", "Not executed", "Unknown", "No checks recorded"]],
+          ["Check", "Status", "Result", "Explanation"])
+
+    chapter("Findings")
+    findings = data.get("findings") or []
+    if not findings:
+        chapters.append(sldc.make_block("paragraph", "No findings were generated by the executed validation checks.",
+                                        section="cadcon-body", style="report_body"))
     else:
-        section("Source", data.get("source", {}))
-        section("Geometry summary", data.get("geometry_summary", {}))
-        section("Validation coverage", data.get("validation", {}))
-        findings = data.get("findings", [])
-        section("Findings", {str(i + 1): f"[{finding['severity']}] {finding['description']}"
-                             for i, finding in enumerate(findings)} or {"status": "No warnings recorded"})
-        section("Provenance", data.get("provenance", {}))
-    # blocks_from_text numbers each independently parsed section from b00001.
-    # Let the authoritative document builder assign globally unique block IDs.
-    for block in blocks:
-        block.pop("id", None)
-    package = sldc.new_package(title, blocks)
-    return sldc.dumps_package(package)
+        for finding in findings:
+            rows = [["Code", _report_value(finding.get("code"))],
+                    ["Severity", _report_value(finding.get("severity"))],
+                    ["Description", _report_value(finding.get("description"))],
+                    ["Measured value", _report_value(finding.get("measured_value"))],
+                    ["Expected condition", _report_value(finding.get("expected_condition"))],
+                    ["Evidence", _report_value(finding.get("evidence"))],
+                    ["Recommendation", _report_value(finding.get("recommendation"))]]
+            table(rows)
+
+    chapter("Provenance")
+    provenance = dict(data.get("provenance") or {})
+    provenance.update({"source_filename": source.get("name"),
+                       "source_format": source.get("format"), "source_size_bytes": source.get("size_bytes"),
+                       "generated_at": generated, "application": "CADCon v1.0", "report_version": data.get("report_version")})
+    if data.get("preview"):
+        provenance["preview"] = data["preview"]
+    if preview_png:
+        provenance["cover_image_sha256"] = hashlib.sha256(preview_png).hexdigest()
+    table([[key.replace("_", " ").capitalize(), _report_value(value)]
+           for key, value in provenance.items()])
+
+    ai = data.get("ai_analysis")
+    if isinstance(ai, dict) and ai.get("agent") and ai.get("evidence") and ai.get("summary"):
+        chapter("AI Analysis")
+        table([["Agent", _report_value(ai["agent"])],
+               ["Evidence", _report_value(ai["evidence"])],
+               ["Interpretation", _report_value(ai["summary"])],
+               ["Limitations", _report_value(ai.get("limitations"))]])
+
+    toc_id = uuid.uuid4().hex[:24]
+    contents = [sldc.make_block("paragraph", "Contents", section="cadcon-contents", style="toc_title",
+                                attributes={"page_break_before": True},
+                                extensions={"slai.sldc.toc": {"id": toc_id, "role": "title", "depth": 1,
+                                                               "show_page_numbers": True, "leader_dots": True,
+                                                               "refresh_mode": "automatic"}})]
+    for name, heading_id in headings:
+        contents.append(sldc.make_block("paragraph", name, section="cadcon-contents", style="toc_entry",
+                                        extensions={"slai.sldc.toc": {"id": toc_id, "role": "entry",
+                                                                       "heading": heading_id, "level": 1,
+                                                                       "source_text": name}}))
+    blocks.extend(contents)
+    blocks.extend(chapters)
+    package = sldc.new_package(title, blocks, styles=styles, sections=sections,
+                               assets=[asset] if asset else (),
+                               publication={"subtitle": f"CADCon v1.0 · Generated {_report_time(generated)}"},
+                               metadata={"report_kind": data.get("report_kind"),
+                                         "report_version": data.get("report_version"),
+                                         "source_sha256": source.get("sha256"),
+                                         "generated_at": generated})
+    package.version = "1.1.0"  # Native TOC and cover-page features are SLDC 1.1.
+    payload = sldc.dumps_package(package)
+    reopened = sldc.loads_package(payload)
+    if reopened.document.get("title") != title or (asset and asset.id not in reopened.assets):
+        raise GeometryError("Exported SLDC did not pass content verification")
+    return payload
 
 
 def capabilities(*, dwg_executable: str | None = None) -> dict[str, Any]:

@@ -10,6 +10,13 @@
    error in the panel. A missing backend or unsupported format pair returns an
    error rather than a fake file.
 4. Choose **Analysis & Report** to inspect geometry and download JSON or SLDC.
+   CADCon captures the actual model as a PNG for the SLDC cover before enabling
+   **Export SLDC**. If capture fails, JSON export still works; use **Retry
+   screenshot** to try again. Reports are downloaded as
+   `cadcon-analysis-{model-stem}.json` or `.sldc`, with the original model name
+   minus its extension. Native SLDC reports contain a cover, linked table of
+   contents, geometry summary, validation coverage, findings, and provenance.
+   Optional AI Analysis appears only with evidence-backed agent output.
 5. Choose **Compare** and select two imported files to compare numeric and
    triangle topology properties; export its report as JSON or SLDC.
 6. Choose **System** to see actual conversion backend availability. The theme
