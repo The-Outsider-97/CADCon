@@ -1,4 +1,4 @@
-"""``python -m applications.cadcon`` from the SLAI root."""
+"""``python -m applications.CADCon`` from the SLAI root."""
 from __future__ import annotations
 
 import sys
