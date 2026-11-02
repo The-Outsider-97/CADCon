@@ -39,6 +39,13 @@ body { color: var(--text); background: var(--bg); font-family: var(--font-ui); f
 .viewer-surface:active { cursor: grabbing; }.viewer-tip { font-size: 11px; margin: 11px 0 0; }
 .svg-viewer { display: flex; justify-content: center; align-items: center; overflow: hidden; }.svg-viewer img { display: block; max-width: 95%; max-height: 95%; }
 .file-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.repair-variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 12px 0 20px; }
+.repair-variant { display: flex; flex-direction: column; align-items: flex-start; text-align: left; min-height: 72px; justify-content: center; }
+.repair-variant:hover, .repair-variant:focus-visible { border-color: var(--accent); }
+.repair-legend { color: #f06b73; font-weight: 700; font-size: 12px; margin-top: 10px; }
+.repair-agent-toggle { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; margin: 12px 0; }
+.repair-preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.repair-mini-viewer { height: 270px; }
 .file-toolbar select { min-width: 210px; flex: 1; }
 .select, .input { border: 1px solid var(--field-border); box-shadow: var(--field-shadow); border-radius: 9px; background: var(--field-bg); color: var(--text); font: inherit; min-height: 40px; padding: 8px 11px; width: 100%; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 13px; margin-bottom: 20px; }

@@ -25,8 +25,12 @@ From `SLAI/`, with CADCon cloned into `applications/CADCon/`:
 py -m applications.CADCon
 ```
 
-If port 8770 is occupied, pass `--port 0` for an ephemeral loopback port. Use
-`--no-browser` to print the authenticated URL without opening a browser.
+CADCon first tries port `8770`. If that default port is already in use, it now
+prints a diagnostic and automatically requests an available loopback port from
+Windows. Pass `--port 0` to request an available port immediately, or
+`--port 8771` to require a specific free port (an explicitly requested busy
+port is an error). Use `--no-browser` to print the authenticated URL without
+opening a browser.
 No app-specific server or shared theme files need to be copied from SLAI.
 
 The app **requires a local SLAI v2.4 checkout** to supply shared application
@@ -59,6 +63,26 @@ truth for CADCon-specific features.
   and page-break/keep-with-next metadata. SLAI's SLDC 1.1 serializer is the
   sole owner of the package and image assets; browser capture must complete
   before the SLDC export button is enabled.
+- **Mesh Repair & Reconstruction** is available under Analysis & Report for
+  triangle meshes. It compares source-index topology with exact or optional
+  tolerance-welded topology, diagnoses boundary loops and non-manifold edges,
+  and builds actual geometry for supported conservative strategies: vertex
+  welding, separation of touching manifold shells, triangulated planar holes,
+  and convex planar caps. Added faces are red in the interactive 3D preview;
+  topology-only changes correctly have no red faces. Repaired candidates are
+  independently checked and can be exported through native SLAI SGEO or OBJ.
+  The selected candidate can also be captured as a separate native SLDC PNG
+  asset inside the report's Findings section, with generated faces colored red.
+  The source is never overwritten. Curvature-aware and volumetric remeshing
+  remain disabled until verified backends are configured. These checks establish
+  topological closure, **not** certified solid validity: self-intersections,
+  coincident shell overlaps, intentional functional openings, and signed solid
+  volume require further validation. CADCon optionally requests explanations
+  from SLAI's public `AgentFactory` and `ReasoningAgent.perform_task` contract,
+  with an eight-second budget and explicit fallback. An agent may be unavailable
+  when its runtime dependencies or trained/configured capabilities are missing;
+  only successfully returned responses are labeled AI-assisted. Deterministic
+  repair and validation remain authoritative.
 
 ## Verified and conditional format matrix
 

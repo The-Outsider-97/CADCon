@@ -3,7 +3,11 @@ export interface Summary { source: { name: string; format: string; size_bytes: n
 export interface Analysis extends Summary { report_kind: string; findings: Array<{ code: string; severity: string; description: string }> }
 export interface Conversion { id: string; source: string; target: string; validated: boolean; warnings: string[]; target_summary: Record<string, unknown>; backend: string; duration_ms: number; source_sha256: string; target_sha256: string; backend_report?: Record<string, unknown> }
 export interface Comparison { report_id: string; status: string; left: Summary; right: Summary; differences: Record<string, { left: unknown; right: unknown }>; note?: string; reason?: string }
-export type Preview = { kind: 'mesh'; vertices: number[][]; faces: number[][]; partial: boolean; total_triangles: number; preview_limit: number } | { kind: 'svg'; markup: string };
+export type Preview = { kind: 'mesh'; vertices: number[][]; faces: number[][]; new_faces?: number[]; partial: boolean; total_triangles: number; preview_limit: number } | { kind: 'svg'; markup: string };
+export interface RepairValidation { boundary_edges: number; nonmanifold_edges: number; inconsistent_winding_edges: number; manifold_face_components: number; topologically_closed: boolean; watertight: boolean; solid_validity: string; status: string; triangles: number; vertices: number }
+export interface RepairCandidate { id: string; strategy: string; label: string; explanation: string; added_faces: number; validation: RepairValidation }
+export interface RepairDiagnosis { source: RepairValidation; reconstructed: RepairValidation; coincident_records: number; boundary_loops: Array<{edges: number; perimeter: number}>; interpretation: string; validation_limitations: string[] }
+export interface RepairResult { diagnosis: RepairDiagnosis; candidates: RepairCandidate[]; agents: {status: string; reason?: string; interpretation?: string; agent?: string} }
 
 export class Api {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

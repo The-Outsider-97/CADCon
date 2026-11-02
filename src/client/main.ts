@@ -1,4 +1,4 @@
-import { Api, type Uploaded, type Summary, type Analysis, type Conversion, type Comparison, type Preview } from './api.js';
+import { Api, type Uploaded, type Summary, type Analysis, type Conversion, type Comparison, type Preview, type RepairCandidate, type RepairResult, type RepairDiagnosis } from './api.js';
 
 const api = new Api();
 type Page = 'counter' | 'converter' | 'analysis' | 'compare' | 'system';
@@ -135,6 +135,7 @@ function viewer(parent: HTMLElement, fileId: string): void {
 
 function meshPainter(preview: Extract<Preview, { kind: 'mesh' }>) {
   const points = preview.vertices;
+  const repairFaces = new Set(preview.new_faces || []);
   // Large STL previews can contain 150k distinct vertex records. Avoid
   // Math.min(...vertices), which overflows browser argument limits at this size.
   const minimum = [Infinity, Infinity, Infinity];
@@ -180,7 +181,8 @@ function meshPainter(preview: Extract<Preview, { kind: 'mesh' }>) {
       const cx = screen[c * 3], cy = screen[c * 3 + 1];
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.closePath();
       const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-      ctx.fillStyle = cross >= 0 ? 'rgba(214,179,0,.65)' : 'rgba(130,148,170,.70)';
+      ctx.fillStyle = repairFaces.has(index) ? 'rgba(235,50,60,.94)'
+        : (cross >= 0 ? 'rgba(214,179,0,.65)' : 'rgba(130,148,170,.70)');
       ctx.fill();
       if (!interactive) { ctx.strokeStyle = report ? 'rgba(6,12,22,.24)' : 'rgba(6,12,22,.26)'; ctx.stroke(); }
     }
@@ -189,27 +191,34 @@ function meshPainter(preview: Extract<Preview, { kind: 'mesh' }>) {
 
 async function captureModelPreview(fileId: string): Promise<Blob> {
   const preview = await api.get<Preview>(`/files/${fileId}/geometry`);
+  if (preview.kind === 'mesh') return captureMeshPng(preview);
   const canvas = document.createElement('canvas');
   canvas.width = 1600; canvas.height = 900;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('This browser cannot render PNG report previews');
-  if (preview.kind === 'mesh') {
-    meshPainter(preview)(ctx, canvas.width, canvas.height, .8, -.45, 1.35, false, 1, true);
-  } else {
-    ctx.fillStyle = '#f7f8fb'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    const image = new Image();
-    const url = URL.createObjectURL(new Blob([preview.markup], { type: 'image/svg+xml' }));
-    try {
-      image.src = url;
-      await image.decode();
-      const scale = Math.min(1440 / image.naturalWidth, 810 / image.naturalHeight);
-      if (!Number.isFinite(scale) || scale <= 0) throw new Error('Drawing preview has invalid dimensions');
-      const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
-      ctx.drawImage(image, (1600 - w) / 2, (900 - h) / 2, w, h);
-    } finally { URL.revokeObjectURL(url); }
-  }
+  ctx.fillStyle = '#f7f8fb'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const image = new Image();
+  const url = URL.createObjectURL(new Blob([preview.markup], { type: 'image/svg+xml' }));
+  try {
+    image.src = url;
+    await image.decode();
+    const scale = Math.min(1440 / image.naturalWidth, 810 / image.naturalHeight);
+    if (!Number.isFinite(scale) || scale <= 0) throw new Error('Drawing preview has invalid dimensions');
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    ctx.drawImage(image, (1600 - w) / 2, (900 - h) / 2, w, h);
+  } finally { URL.revokeObjectURL(url); }
   return await new Promise<Blob>((resolve, reject) => canvas.toBlob(
     blob => blob ? resolve(blob) : reject(new Error('Failed to capture the model preview')), 'image/png'));
+}
+
+async function captureMeshPng(preview: Extract<Preview, { kind: 'mesh' }>): Promise<Blob> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1600; canvas.height = 900;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('This browser cannot render PNG report previews');
+  meshPainter(preview)(ctx, canvas.width, canvas.height, .8, -.45, 1.35, false, 1, true);
+  return new Promise<Blob>((resolve, reject) => canvas.toBlob(
+    blob => blob ? resolve(blob) : reject(new Error('Failed to capture the repair PNG')), 'image/png'));
 }
 
 function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview, { kind: 'mesh' }>): void {
@@ -249,6 +258,142 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
   resize.observe(canvas);
   viewerDisposers.push(() => { resize.disconnect(); window.cancelAnimationFrame(frame); window.clearTimeout(wheelSettled); });
   schedule(false);
+}
+
+function repairPanel(fileId: string, reportId: string): HTMLElement {
+  const panel = card('Mesh Repair & Reconstruction');
+  panel.append(el('p', 'muted', 'Diagnose welded topology before generating repair surfaces. CADCon never overwrites the original model.'));
+  const toleranceLabel = el('label', 'field'); toleranceLabel.append(el('span', '', 'Welding tolerance (source units; 0 = exact)'));
+  const tolerance = el('input', 'input'); tolerance.type = 'number'; tolerance.min = '0'; tolerance.step = '0.0001'; tolerance.value = '0';
+  toleranceLabel.append(tolerance);
+  const agentLabel = el('label', 'repair-agent-toggle');
+  const agentToggle = el('input'); agentToggle.type = 'checkbox'; agentToggle.checked = true;
+  agentLabel.append(agentToggle, el('span', '', 'Use SLAI Reasoning Agent when available (optional)'));
+  const actions = el('div', 'file-toolbar');
+  const results = el('div', 'detail-stack');
+  const variants = el('div', 'repair-variants');
+  const display = el('div');
+
+  function settings(): { id: string; unit: string; tolerance: number } {
+    const value = Number(tolerance.value);
+    if (!Number.isFinite(value) || value < 0) throw new Error('Welding tolerance must be finite and non-negative');
+    return { id: fileId, unit: assumedUnit, tolerance: value };
+  }
+
+  function diagnosticView(data: RepairDiagnosis): void {
+    const cardEl = card('Reconstructed topology');
+    cardEl.append(el('p', 'muted', data.interpretation));
+    const original = data.source, updated = data.reconstructed;
+    const matrix = el('div', 'stats-grid');
+    matrix.append(stat('Source-index boundary edges', original.boundary_edges),
+      stat('Reconstructed boundary edges', updated.boundary_edges),
+      stat('Reconstructed non-manifold edges', updated.nonmanifold_edges),
+      stat('Boundary loops', data.boundary_loops.length),
+      stat('Coincident records', data.coincident_records),
+      stat('Winding conflicts', updated.inconsistent_winding_edges));
+    cardEl.append(matrix, el('p', 'notice warning', data.validation_limitations.join(' · ')));
+    results.replaceChildren(cardEl);
+  }
+
+  async function showCandidate(candidate: RepairCandidate): Promise<void> {
+    const preview = await api.get<Preview>(`/repair/candidates/${candidate.id}/preview`);
+    if (preview.kind !== 'mesh') throw new Error('Repair candidate is not a mesh');
+    const details = card(`${candidate.label} · 3D preview`);
+    const row = el('div', 'file-toolbar');
+    const checks = candidate.validation;
+    row.append(stat('Watertight topology', checks.watertight ? 'Yes' : 'No'),
+      stat('Boundary edges', checks.boundary_edges), stat('Non-manifold edges', checks.nonmanifold_edges),
+      stat('New red faces', candidate.added_faces));
+    details.append(row, el('p', 'muted', candidate.explanation));
+    const canvas = el('canvas', 'viewer-surface') as HTMLCanvasElement;
+    canvas.setAttribute('aria-label', 'Interactive repaired model; red faces are added surfaces');
+    details.append(canvas);
+    if (preview.new_faces?.length) details.append(el('p', 'repair-legend', '■ Red = generated repair faces · Gold/gray = original faces'));
+    else details.append(el('p', 'muted', 'Topology-only repair: no additional surfaces were generated.'));
+    if (preview.partial) details.append(el('p', 'notice warning', `Preview capped at ${preview.preview_limit} triangles; export retains the complete model.`));
+    const toolbar = el('div', 'file-toolbar');
+    for (const format of ['sgeo', 'obj']) {
+      toolbar.append(button(`Export ${format.toUpperCase()}`, () => {
+        void action(async () => {
+          const exported = await api.post<{ id: string; filename: string; export_verified: boolean }>(
+            `/repair/candidates/${candidate.id}/export`, { format });
+          await api.download(`/outputs/${exported.id}`, exported.filename);
+          notice(`Validated export: ${exported.filename}`);
+        });
+      }, format === 'sgeo' ? 'btn-primary' : 'btn-outline'));
+    }
+    toolbar.append(button('Compare original', () => {
+      const original = el('div', 'workspace-grid compare-previews');
+      viewer(original, fileId);
+      const repaired = card('Selected repaired model');
+      const other = el('canvas', 'viewer-surface') as HTMLCanvasElement;
+      repaired.append(other); original.append(repaired);
+      display.replaceChildren(original);
+      startCanvasPreview(other, preview);
+    }, 'btn-outline'));
+    details.append(toolbar);
+    display.replaceChildren(details);
+    startCanvasPreview(canvas, preview);
+    const reportImageStatus = el('p', 'muted', 'Capturing selected repair geometry for the SLDC report…');
+    details.append(reportImageStatus);
+    try {
+      const screenshot = await captureMeshPng(preview);
+      await api.postBlob(`/reports/${reportId}/repair-preview?candidate_id=${candidate.id}`, screenshot);
+      reportImageStatus.textContent = 'Repair PNG embedded in the analysis report (red faces show generated surfaces).';
+    } catch (error) {
+      reportImageStatus.textContent = `Repair report screenshot unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  const generate = button('Generate Repair Variants', () => {
+    void action(async () => {
+      generate.disabled = true;
+      try {
+        results.replaceChildren(el('p', 'muted', 'Building and independently validating repair candidates…'));
+        const result = await api.post<RepairResult>('/repair/suggest', { ...settings(), max_candidates: 5, use_agents: agentToggle.checked });
+        diagnosticView(result.diagnosis);
+        results.append(el('p', 'muted', result.agents.interpretation || result.agents.reason || 'SLAI agent analysis unavailable; deterministic measurements remain authoritative.'));
+        variants.replaceChildren(); display.replaceChildren();
+        if (!result.candidates.length) {
+          variants.append(el('p', 'notice warning', 'No applicable validated repair geometry could be generated. The original model is unchanged.'));
+          return;
+        }
+        variants.append(button('Show all 3D variants', () => {
+          void action(async () => {
+            const grid = el('div', 'repair-preview-grid');
+            for (const option of result.candidates) {
+              const preview = await api.get<Preview>(`/repair/candidates/${option.id}/preview`);
+              if (preview.kind !== 'mesh') continue;
+              const tile = card(option.label);
+              const canvas = el('canvas', 'viewer-surface repair-mini-viewer') as HTMLCanvasElement;
+              tile.append(canvas, el('p', 'muted', `${option.validation.status} · ${option.added_faces} new red faces`));
+              grid.append(tile);
+              startCanvasPreview(canvas, preview);
+            }
+            display.replaceChildren(grid);
+          });
+        }, 'btn-outline'));
+        for (const candidate of result.candidates) {
+          const tile = button(candidate.label, () => {
+            void action(() => showCandidate(candidate));
+          }, 'btn-outline repair-variant');
+          tile.append(el('span', 'muted', ` · ${candidate.validation.status} · +${candidate.added_faces} faces`));
+          variants.append(tile);
+        }
+        await showCandidate(result.candidates[0]);
+      } finally { generate.disabled = false; }
+    });
+  }, 'btn-primary');
+  generate.disabled = true;
+  actions.append(button('Analyze Repair Options', () => {
+    void action(async () => {
+      const result = await api.post<{ diagnosis: RepairDiagnosis }>('/repair/analyze', settings());
+      diagnosticView(result.diagnosis);
+      generate.disabled = false;
+    });
+  }, 'btn-outline'), generate);
+  panel.append(toleranceLabel, agentLabel, actions, results, variants, display);
+  return panel;
 }
 
 function counter(main: HTMLElement): void {
@@ -333,6 +478,9 @@ function analysisPage(main: HTMLElement): void {
       const result = await api.post<{ id: string; report: Analysis; filenames: { json: string; sldc: string } }>(
         '/analyze', { id: fileId, unit: assumedUnit });
       output.replaceChildren(); resultBlock(output, result.report);
+      if (result.report.geometry_summary.representation === 'triangle_mesh') {
+        output.append(repairPanel(fileId, result.id));
+      }
       const actions = el('div', 'file-toolbar');
       actions.append(button('Export JSON', () => {
         void api.download(`/reports/${result.id}?format=json`, result.filenames.json).catch(e => notice(e.message, true));

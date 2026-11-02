@@ -17,6 +17,18 @@
    minus its extension. Native SLDC reports contain a cover, linked table of
    contents, geometry summary, validation coverage, findings, and provenance.
    Optional AI Analysis appears only with evidence-backed agent output.
+   For an open or non-manifold triangle mesh, open **Mesh Repair &
+   Reconstruction** below the analysis warning. Choose the welding tolerance
+   (zero means exact coordinates), click **Analyze Repair Options**, review
+   both source-index and reconstructed topology, and then click **Generate
+   Repair Variants**. The candidate viewer colors genuinely added faces red;
+   topology-only changes add no red surfaces. Candidate buttons show measured
+   status and provide verified **Export SGEO** and **Export OBJ** actions.
+   Selecting a candidate captures its 3D repair preview for the native SLDC
+   report, including red generated surfaces where present.
+   Export never overwrites the source. A topologically watertight mesh may
+   still contain untested self-intersections or overlapping shells; CADCon
+   does not certify solid volume based on these checks alone.
 5. Choose **Compare** and select two imported files to compare numeric and
    triangle topology properties; export its report as JSON or SLDC.
 6. Choose **System** to see actual conversion backend availability. The theme
@@ -28,4 +40,8 @@ returns when movement stops. The preview is not a
 precision CAD viewport; analysis always uses the full accepted file. For
 unitless inputs, the current default user assumption is millimeters. Exact
 STEP/ACIS conversion, freeform geometric comparison, complete batch jobs and
-SLAI Agent inference are not yet implemented.
+The optional SLAI Reasoning Agent analyzes structured topology evidence when
+its existing factory can create a working agent. It does not alter the mesh;
+the deterministic repair engine remains authoritative if the agent is
+unavailable or disabled. Curvature-surface fairing and volumetric remeshing
+require verified optional backends.

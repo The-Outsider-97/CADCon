@@ -597,7 +597,8 @@ def _report_time(value: str) -> str:
         return value
 
 
-def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = None) -> bytes:
+def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = None,
+                 repair_preview_png: bytes | None = None) -> bytes:
     if fmt == "json":
         return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     if fmt != "sldc":
@@ -632,6 +633,7 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
 
     # Native SLDC 1.1 sections/TOC/figure assets; keep all text editable.
     asset = sldc.make_asset(preview_png) if preview_png else None
+    repair_asset = sldc.make_asset(repair_preview_png) if repair_preview_png else None
     styles = {"paragraph": {
         "cover_title": {"font_size_pt": 23, "bold": True, "align": "center", "space_after_pt": 14},
         "cover_subtitle": {"font_size_pt": 11, "align": "center", "space_after_pt": 18},
@@ -640,6 +642,8 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
         "toc_entry": {"font_size_pt": 11, "space_after_pt": 7},
         "report_heading": {"font_size_pt": 16, "bold": True, "space_after_pt": 9,
                            "keep_with_next": True},
+        "repair_subheading": {"font_size_pt": 11, "bold": True, "space_after_pt": 6,
+                              "keep_with_next": True},
         "report_body": {"font_size_pt": 10, "space_after_pt": 6},
     }}
     page = {"size": "A4", "margins_mm": {"top": 18, "right": 19, "bottom": 18, "left": 19}}
@@ -742,6 +746,28 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
                     ["Recommendation", _report_value(finding.get("recommendation"))]]
             table(rows)
 
+    repair = data.get("repair")
+    if isinstance(repair, dict) and isinstance(repair.get("diagnosis"), dict):
+        observed = repair["diagnosis"]
+        chapters.append(sldc.make_block("paragraph", "Mesh repair and reconstructed topology",
+                                        section="cadcon-body", style="repair_subheading"))
+        before = observed.get("source") or {}
+        after = observed.get("reconstructed") or {}
+        table([["Source-index boundary edges", _report_value(before.get("boundary_edges"))],
+               ["Reconstructed boundary edges", _report_value(after.get("boundary_edges"))],
+               ["Reconstructed non-manifold edges", _report_value(after.get("nonmanifold_edges"))],
+               ["Diagnosis", _report_value(observed.get("interpretation"))]])
+        candidates = repair.get("candidates") or []
+        if candidates:
+            table([[str(c.get("label")), _report_value((c.get("validation") or {}).get("status")),
+                    _report_value(c.get("added_faces"))] for c in candidates],
+                  ["Repair candidate", "Validated status", "Added faces"])
+        if repair_asset is not None:
+            figure = sldc.make_figure(repair_asset, alt="Actual selected repair candidate; added surfaces are red",
+                                      width_mm=160, align="center")
+            figure["section"] = "cadcon-body"
+            chapters.append(figure)
+
     chapter("Provenance")
     provenance = dict(data.get("provenance") or {})
     provenance.update({"source_filename": source.get("name"),
@@ -749,6 +775,8 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
                        "generated_at": generated, "application": "CADCon v1.0", "report_version": data.get("report_version")})
     if data.get("preview"):
         provenance["preview"] = data["preview"]
+    if repair:
+        provenance["mesh_repair_agents"] = (repair.get("agents") or {}).get("status", "not recorded")
     if preview_png:
         provenance["cover_image_sha256"] = hashlib.sha256(preview_png).hexdigest()
     table([[key.replace("_", " ").capitalize(), _report_value(value)]
@@ -775,8 +803,9 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
                                                                        "source_text": name}}))
     blocks.extend(contents)
     blocks.extend(chapters)
+    image_assets = list({value.id: value for value in (asset, repair_asset) if value is not None}.values())
     package = sldc.new_package(title, blocks, styles=styles, sections=sections,
-                               assets=[asset] if asset else (),
+                               assets=image_assets,
                                publication={"subtitle": f"CADCon v1.0 · Generated {_report_time(generated)}"},
                                metadata={"report_kind": data.get("report_kind"),
                                          "report_version": data.get("report_version"),
@@ -785,7 +814,7 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
     package.version = "1.1.0"  # Native TOC and cover-page features are SLDC 1.1.
     payload = sldc.dumps_package(package)
     reopened = sldc.loads_package(payload)
-    if reopened.document.get("title") != title or (asset and asset.id not in reopened.assets):
+    if reopened.document.get("title") != title or any(image.id not in reopened.assets for image in image_assets):
         raise GeometryError("Exported SLDC did not pass content verification")
     return payload
 
