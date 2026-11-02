@@ -1,0 +1,5 @@
+{
+  "name": "cadcon", "private": true, "version": "1.0.0", "type": "module",
+  "scripts": { "build": "node tools/build.mjs", "typecheck": "tsc -p tsconfig.build.json" },
+  "devDependencies": { "typescript": "^5.7.3" }
+}

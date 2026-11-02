@@ -1,3 +1,3 @@
-"""CADCon: CAD Converter for DWG, STL, SAT, OBJ, STEP, GLB, FBX, SGEO, SDRW."""
+"""CADCon: SLAI-integrated inspection, reporting and verified CAD exchange."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.0-dev"

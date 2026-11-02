@@ -1,39 +1,54 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Python application
+name: CADCon integration checks
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main", "feature/cadcon-v1-foundation"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.10"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        pytest
+      - name: Check out CADCon
+        uses: actions/checkout@v4
+
+      - name: Check out SLAI v2.4 shared runtime
+        uses: actions/checkout@v4
+        with:
+          repository: The-Outsider-97/SLAI
+          ref: SLAI-v.2.4
+          path: .ci-slai
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest flake8
+
+      - name: Reject Python syntax and undefined-name errors
+        run: |
+          flake8 app.py engine.py run_cadcon.py tests --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Test native SLAI interop and CADCon services
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.ci-slai:${{ github.workspace }}
+          SLAI_ROOT: ${{ github.workspace }}/.ci-slai
+        run: python -m pytest -q tests
+
+      - name: Compile the frontend with SLAI's shared builder
+        env:
+          SLAI_ROOT: ${{ github.workspace }}/.ci-slai
+        run: |
+          npm ci
+          npm run build
