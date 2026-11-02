@@ -35,7 +35,15 @@
    still contain untested self-intersections or overlapping shells; CADCon
    does not certify solid volume based on these checks alone.
 5. Choose **Compare** and select two imported files to compare numeric and
-   triangle topology properties; export its report as JSON or SLDC.
+   triangle topology properties. The comparison SLDC shares CADCon's native
+   analysis report styling: a CADCon-logo cover, a table of contents, model
+   information, geometry summary, validation coverage, differences and
+   provenance. The left and right model previews are captured as PNGs and
+   embedded side by side after the **Differences** table. **Export SLDC** is
+   enabled once both screenshots are ready; use **Retry model screenshots**
+   if capture fails. JSON export remains available independently. Both SLDC
+   report types include document information in their page headers. The A4
+   content area extends from x=15 mm to x=195 mm.
 6. Choose **System** to see actual conversion backend availability. The theme
    toggle remains at the bottom of the sidebar.
 
@@ -45,13 +53,8 @@ returns when movement stops. The preview is not a
 precision CAD viewport; analysis always uses the full accepted file. For
 unitless inputs, the current default user assumption is millimeters. Exact
 STEP/ACIS conversion, freeform geometric comparison, complete batch jobs and
-Optional SLAI agents assist but never decide. The Verification Agent checks
-each candidate's declared postconditions (shown under the candidate as
-"verified" or "refuted"); the Reasoning Agent explains the diagnosis in words
-(and, with *Interpret findings*, the analysis findings) and is labelled
-AI-assisted; in Compare, *Estimate rigid registration* uses the Spatial Agent
-on sampled surface points and is labelled an estimate. None of them alters the
-mesh, and the deterministic repair engine remains authoritative if an agent is
-unavailable or disabled. **System** shows each agent's live state, the active
-configuration with the origin of its values, and *Reload configuration*. Curvature-surface fairing and volumetric remeshing
+The optional SLAI Reasoning Agent analyzes structured topology evidence when
+its existing factory can create a working agent. It does not alter the mesh;
+the deterministic repair engine remains authoritative if the agent is
+unavailable or disabled. Curvature-surface fairing and volumetric remeshing
 require verified optional backends.

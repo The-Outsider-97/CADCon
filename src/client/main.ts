@@ -1,4 +1,4 @@
-import { Api, type Uploaded, type Summary, type Analysis, type Conversion, type Comparison, type Preview, type RepairCandidate, type RepairResult, type RepairDiagnosis, type AgentCheck, type AgentStatus, type SystemInfo, type Registration } from './api.js';
+import { Api, type Uploaded, type Summary, type Analysis, type Conversion, type Comparison, type Preview, type RepairCandidate, type RepairResult, type RepairDiagnosis } from './api.js';
 
 const api = new Api();
 type Page = 'counter' | 'converter' | 'analysis' | 'compare' | 'system';
@@ -11,7 +11,7 @@ const files: Uploaded[] = [];
 let page: Page = 'counter';
 let busy = false;
 let selected = '';
-let systemData: SystemInfo | null = null;
+let systemData: Record<string, unknown> | null = null;
 let capabilities: { formats: Record<string, { available: boolean; import: boolean; export: boolean; backend: string; limitations: string[] }>; routes: Record<string, string[]>; conditional: Record<string, string> } | null = null;
 let viewerDisposers: Array<() => void> = [];
 const UNITS = ['mm', 'cm', 'm', 'in', 'ft'];
@@ -73,28 +73,10 @@ function pairs(values: Record<string, unknown>): HTMLElement {
   }
   return table;
 }
-function formatLimit(): string {
-  const bytes = systemData?.limits.max_source_bytes ?? 64 * 1024 * 1024;
-  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MiB` : `${Math.round(bytes / 1024)} KiB`;
-}
-async function refreshSystem(): Promise<void> {
-  try { systemData = await api.get<SystemInfo>('/system'); } catch (error) { notice(error instanceof Error ? error.message : String(error), true); }
-}
-function agentChecks(checks: AgentCheck[] | undefined): HTMLElement | null {
-  if (!checks?.length) return null;
-  const list = el('ul', 'agent-checks');
-  for (const check of checks) {
-    const outcome = check.status === 'completed' ? (check.assessment ?? 'completed') : `${check.status.replaceAll('_', ' ')}${check.reason ? ` (${check.reason})` : ''}`;
-    const item = el('li', check.assessment === 'refuted' ? 'bad' : '', `${check.operation.replaceAll('_', ' ')}: ${outcome}`);
-    item.title = [...(check.evidence ?? []).map(e => `${e.kind}: ${e.claim}`), ...(check.limitations ?? [])].join(' · ');
-    list.append(item);
-  }
-  return list;
-}
 function uploadBox(done: (file: Uploaded) => void): HTMLElement {
   const wrap = el('div', 'drop-zone');
   const input = el('input'); input.type = 'file'; input.accept = '.stl,.obj,.glb,.sgeo,.sdrw,.dxf,.dwg,.svg,.ifc,.step,.stp,.fbx,.sat'; input.hidden = true;
-  const label = el('strong', '', 'Drop CAD files here'); const hint = el('span', 'muted', 'or click to browse · ' + formatLimit() + ' maximum');
+  const label = el('strong', '', 'Drop CAD files here'); const hint = el('span', 'muted', 'or click to browse · 64 MiB maximum');
   wrap.append(el('div', 'drop-icon', '↥'), label, hint, input);
   wrap.tabIndex = 0; wrap.setAttribute('role', 'button'); wrap.setAttribute('aria-label', 'Upload CAD file');
   wrap.addEventListener('click', () => input.click());
@@ -288,7 +270,7 @@ function repairPanel(fileId: string, reportId: string): HTMLElement {
   toleranceLabel.append(tolerance, el('span', 'muted', 'Leave blank to test safe model-scaled tolerances automatically. Enter 0 for exact matching or a value to override.'));
   const agentLabel = el('label', 'repair-agent-toggle');
   const agentToggle = el('input'); agentToggle.type = 'checkbox'; agentToggle.checked = true;
-  agentLabel.append(agentToggle, el('span', '', 'Use SLAI agents when available (Verification checks postconditions, Reasoning explains; both optional)'));
+  agentLabel.append(agentToggle, el('span', '', 'Use SLAI Reasoning Agent when available (optional)'));
   const actions = el('div', 'file-toolbar');
   const results = el('div', 'detail-stack');
   const variants = el('div', 'repair-variants');
@@ -384,7 +366,7 @@ function repairPanel(fileId: string, reportId: string): HTMLElement {
       generate.disabled = true;
       try {
         results.replaceChildren(el('p', 'muted', 'Building and independently validating repair candidates…'));
-        const result = await api.post<RepairResult>('/repair/suggest', { ...settings(), use_agents: agentToggle.checked });
+        const result = await api.post<RepairResult>('/repair/suggest', { ...settings(), max_candidates: 5, use_agents: agentToggle.checked });
         diagnosticView(result.diagnosis);
         results.append(el('p', 'muted', result.agents.interpretation || result.agents.reason || 'SLAI agent analysis unavailable; deterministic measurements remain authoritative.'));
         variants.replaceChildren(); display.replaceChildren();
@@ -413,8 +395,6 @@ function repairPanel(fileId: string, reportId: string): HTMLElement {
           }, 'btn-outline repair-variant');
           tile.append(el('span', 'muted', ` · ${candidate.validation.status} · +${candidate.added_faces} faces`));
           variants.append(tile);
-          const checks = agentChecks(candidate.agent_checks);
-          if (checks) { const holder = el('div', 'muted'); holder.append(el('small', '', `Verification Agent · postconditions of ${candidate.label}`), checks); variants.append(holder); }
         }
         await showCandidate(result.candidates[0]);
       } finally { generate.disabled = false; }
@@ -482,12 +462,6 @@ function converter(main: HTMLElement): void {
         output.replaceChildren(el('div', 'notice success', `Converted and validated: ${res.source} → ${res.target}`));
         output.append(el('p', 'muted', `${res.backend} · ${res.duration_ms} ms · SHA-256: ${res.target_sha256.slice(0, 18)}…`));
         if (res.warnings.length) output.append(el('div', 'notice warning', res.warnings.join(' · ')));
-        if (res.fidelity) {
-          const fidelity = el('div', res.fidelity.passed ? 'notice success' : 'notice warning',
-            res.fidelity.passed ? 'Output re-read and measured against the source: ' : 'Output differs from the source: ');
-          fidelity.append(el('span', '', res.fidelity.checks.map(check => `${check.name.replaceAll('_', ' ')} ${check.status}`).join(' · ')));
-          output.append(fidelity);
-        }
         const download = () => api.download('/outputs/' + res.id, res.target);
         output.append(button('Download ' + res.target, () => { void download().catch(e => notice(e.message, true)); }, 'btn-primary'));
         try {
@@ -532,19 +506,9 @@ function analysisPage(main: HTMLElement): void {
       }, 'btn-primary');
       sldcButton.disabled = true;
       actions.append(sldcButton);
-      const interpretation = el('div', 'detail-stack');
-      actions.append(button('Interpret findings (Reasoning Agent)', () => {
-        void action(async () => {
-          const outcome = await api.post<{ status: string; reason?: string; result?: { interpretation: string }; limitations: string[] }>(`/reports/${result.id}/interpret`, {});
-          interpretation.replaceChildren(outcome.status === 'completed' && outcome.result
-            ? card('Reasoning Agent interpretation (advisory, ai-assisted)')
-            : el('div', 'notice warning', outcome.reason || 'The Reasoning Agent is unavailable; the deterministic findings above remain authoritative.'));
-          if (outcome.status === 'completed' && outcome.result) interpretation.firstElementChild!.append(el('p', '', outcome.result.interpretation), el('p', 'muted', outcome.limitations.join(' · ')));
-        });
-      }, 'btn-outline'));
-      output.prepend(actions, interpretation);
+      output.prepend(actions);
       const previewStatus = el('p', 'muted', 'Rendering the actual model preview for the SLDC cover…');
-      interpretation.after(previewStatus);
+      actions.after(previewStatus);
       const prepare = async (): Promise<void> => {
         const picture = await captureModelPreview(fileId);
         await api.postBlob(`/reports/${result.id}/preview?source_id=${encodeURIComponent(fileId)}`, picture);
@@ -588,17 +552,6 @@ function analysisPage(main: HTMLElement): void {
   main.append(spatial);
 }
 
-function registrationView(info: Registration): HTMLElement {
-  const box = card('Spatial Agent registration (estimate)');
-  if (info.status !== 'completed' || !info.result) {
-    box.append(el('p', 'muted', info.reason || `Registration ${info.status.replaceAll('_', ' ')}.`)); return box;
-  }
-  box.append(pairs({ residual_rmse: `${info.result.rmse.toPrecision(4)} ${info.unit ?? ''}`.trim(), converged: info.result.converged ?? 'unknown',
-    iterations: info.result.iterations ?? 'unknown', samples: info.samples ?? 'unknown', direction: info.direction ?? '' }),
-    el('p', 'muted', (info.limitations ?? []).join(' · ')));
-  return box;
-}
-
 function comparePage(main: HTMLElement): void {
   main.append(heading('Model Compare', 'Detect grounded differences between two compatible CAD files'));
   main.append(uploadBox(() => show('compare')));
@@ -610,77 +563,67 @@ function comparePage(main: HTMLElement): void {
     const wrapper = el('label', 'field'); wrapper.append(el('span', '', name), field); fields.append(wrapper);
   }
   fields.append(declaredUnit());
-  const registerLabel = el('label', 'repair-agent-toggle'); const registerToggle = el('input'); registerToggle.type = 'checkbox';
-  registerLabel.append(registerToggle, el('span', '', 'Estimate rigid registration with the SLAI Spatial Agent (sampled surface points; optional)'));
   const output = el('div');
-  panel.append(fields, registerLabel, button('Compare models', () => {
+  panel.append(fields, button('Compare models', () => {
     if (!left.value || !right.value) { notice('Select two models', true); return; }
     void action(async () => {
-      const result = await api.post<Comparison>('/compare', { left: left.value, right: right.value, tolerance: Number(tol.value), unit: assumedUnit, register: registerToggle.checked });
+      const leftId = left.value, rightId = right.value;
+      const result = await api.post<Comparison>('/compare', { left: leftId, right: rightId, tolerance: Number(tol.value), unit: assumedUnit });
       const detail = card(`Result: ${result.status.replaceAll('_', ' ')}`);
       if (result.reason || result.note) detail.append(el('p', 'muted', result.reason || result.note));
       if (Object.keys(result.differences).length) detail.append(pairs(Object.fromEntries(Object.entries(result.differences).map(([k, v]) => [k, `${JSON.stringify(v.left)} → ${JSON.stringify(v.right)}`]))));
       else detail.append(el('p', '', 'No differences found in the measured summary fields.'));
-      if (result.surface_distance) detail.append(el('h2', 'panel-title', 'Surface distance (approximate, sampled)'), pairs(result.surface_distance));
-      if (result.registration) detail.append(registrationView(result.registration));
       const actions = el('div', 'file-toolbar');
       actions.append(button('Export JSON', () => { void api.download(`/reports/${result.report_id}?format=json`, 'cadcon-comparison.json').catch(e => notice(e.message, true)); }, 'btn-outline'));
-      actions.append(button('Export SLDC', () => { void api.download(`/reports/${result.report_id}?format=sldc`, 'cadcon-comparison.sldc').catch(e => notice(e.message, true)); }, 'btn-primary'));
+      const sldcButton = button('Export SLDC', () => {
+        void api.download(`/reports/${result.report_id}?format=sldc`, 'cadcon-comparison.sldc').catch(e => notice(e.message, true));
+      }, 'btn-primary');
+      sldcButton.disabled = true;
+      actions.append(sldcButton);
+      const previewStatus = el('p', 'muted', 'Preparing actual left and right model PNGs for the SLDC comparison report…');
       const previews = el('div', 'workspace-grid compare-previews');
-      viewer(previews, left.value); viewer(previews, right.value);
-      output.replaceChildren(detail, actions, previews);
+      viewer(previews, leftId); viewer(previews, rightId);
+      output.replaceChildren(detail, actions, previewStatus, previews);
+      const prepare = async (): Promise<void> => {
+        for (const [side, id] of [['left', leftId], ['right', rightId]] as const) {
+          previewStatus.textContent = `Capturing ${side} model PNG for native SLDC…`;
+          const image = await captureModelPreview(id);
+          await api.postBlob(`/reports/${result.report_id}/comparison-preview?side=${side}&source_id=${encodeURIComponent(id)}`, image);
+        }
+        const partial = [result.left, result.right].some(model => Number(model.geometry_summary.triangles || 0) > 50_000);
+        previewStatus.textContent = partial
+          ? 'Both model PNGs embedded side by side after Differences. The screenshots use the 50,000-triangle preview limit; comparison statistics use the full models.'
+          : 'Both model PNGs embedded in the comparison SLDC (side by side after Differences).';
+        sldcButton.disabled = false;
+      };
+      try { await prepare(); }
+      catch (error) {
+        previewStatus.textContent = `Comparison preview unavailable: ${error instanceof Error ? error.message : String(error)}. JSON export remains available.`;
+        previewStatus.classList.add('notice', 'warning');
+        const retry = button('Retry model screenshots', () => {
+          void action(async () => {
+            retry.disabled = true;
+            try { await prepare(); retry.remove(); previewStatus.classList.remove('notice', 'warning'); }
+            finally { retry.disabled = false; }
+          });
+        }, 'btn-outline');
+        previewStatus.after(retry);
+      }
     });
   }, 'btn-primary'), output);
-  main.append(panel, el('p', 'muted', 'Comparing equal counts is not proof of geometric equivalence. Registration, when requested, is an estimate from sampled points and not a CAD feature match.'));
-}
-
-function agentRows(integrations: AgentStatus[], workflows: Record<string, string[]>): HTMLElement {
-  const list = el('div', 'capability-list');
-  for (const agent of integrations) {
-    const row = el('div', 'capability-row'); const ready = agent.state === 'ready';
-    const used = Object.entries(workflows).filter(([, keys]) => keys.includes(agent.key)).map(([name]) => name.replaceAll('_', ' '));
-    row.append(el('strong', '', agent.key), el('span', '', agent.state.replaceAll('_', ' ') + (agent.cooldown_seconds ? ` · resting ${Math.round(agent.cooldown_seconds)} s` : '')));
-    row.title = [agent.class, agent.reason, agent.last_failure, used.length ? `Workflows: ${used.join(', ')}` : 'No workflow routed',
-      agent.metrics ? `Calls ${agent.metrics.calls}, completed ${agent.metrics.completed}, timeouts ${agent.metrics.timeouts}, mean ${agent.metrics.mean_ms} ms` : ''].filter(Boolean).join(' · ');
-    row.classList.add(ready ? 'ready' : agent.enabled ? '' : 'disabled'); list.append(row);
-  }
-  return list;
+  main.append(panel, el('p', 'muted', 'Comparing equal counts is not proof of geometric equivalence. Detailed surface registration is not yet implemented.'));
 }
 
 function systemPage(main: HTMLElement): void {
-  main.append(heading('System', 'Conversion backends, SLAI agent integration, configuration and application diagnostics'));
+  main.append(heading('System', 'Conversion backends, SLAI integration and application diagnostics'));
   const grid = el('div', 'workspace-grid'); main.append(grid);
   const system = card('Application status'); const formats = card('Format capabilities'); grid.append(system, formats);
   if (systemData) {
-    const info = systemData;
-    system.append(pairs({ version: info.version, python: info.python, mode: info.mode, dwg_backend: info.dwg_backend, imported_models: info.uploaded_files,
-      outputs: info.outputs, max_source_bytes: info.limits.max_source_bytes, max_triangles: info.limits.max_triangles,
-      preview_triangle_limit: info.limits.preview_triangle_limit, analysis_cache: `${info.cache.entries}/${info.cache.capacity} entries · ${info.cache.hits} hits · ${info.cache.misses} misses` }));
-    const config = card('Configuration');
-    config.append(pairs({ loaded_from: `${info.configuration.loaded_from}${info.configuration.file ? ` (${info.configuration.file})` : ''}`,
-      values_from_file: info.configuration.sources.yaml ?? 0, values_from_environment: info.configuration.sources.env ?? 0,
-      values_from_overrides: info.configuration.sources.override ?? 0, built_in_defaults: info.configuration.sources.default ?? 0,
-      repair_mode: String((info.repair as Record<string, unknown>).mode ?? 'unknown') }));
-    if (info.configuration.overridden.length) config.append(el('p', 'muted', `Overridden: ${info.configuration.overridden.join(', ')}`));
-    for (const note of info.configuration.notes) config.append(el('p', 'notice warning', note));
-    config.append(button('Reload configuration', () => {
-      void action(async () => {
-        await api.post('/config/reload', {}); systemData = await api.get<SystemInfo>('/system'); notice('Configuration reloaded'); show('system');
-      });
-    }, 'btn-outline'));
-    const agents = card('SLAI agents');
-    agents.append(el('p', 'muted', info.agents.enabled
-      ? 'Agents are optional, loaded on first use and isolated: a missing, slow or failing agent never changes the deterministic geometry results.'
-      : 'SLAI agent assistance is switched off in the configuration.'));
-    agents.append(agentRows(info.agents.integrations, info.agents.workflows));
-    agents.append(pairs({ calls_in_flight: info.agents.metrics.inflight, abandoned_calls: info.agents.metrics.abandoned_calls }), el('p', 'muted', info.agents.not_integrated));
-    agents.append(button('Check agents now', () => {
-      void action(async () => {
-        const probe = await api.get<{ agents: AgentStatus[] }>('/agents?probe=1');
-        info.agents.integrations = probe.agents; show('system');
-      });
-    }, 'btn-outline'));
-    main.append(agents, config);
+    system.append(pairs(systemData));
+    const agents = systemData.agents;
+    if (agents && typeof agents === 'object' && !Array.isArray(agents)) {
+      system.append(el('h2', 'panel-title', 'SLAI integration'), pairs(agents as Record<string, unknown>));
+    }
   }
   if (capabilities) {
     const list = el('div', 'capability-list');
@@ -734,7 +677,7 @@ for (const [id, label, icon] of NAV) {
   const b = button(`${icon}   ${label}`, () => show(id), 'nav-item'); b.dataset.page = id; nav.append(b);
 }
 const spacer = el('div', 'spacer');
-const system = button('⚙   System', () => { void refreshSystem().finally(() => show('system')); }, 'nav-item subtle'); system.dataset.page = 'system';
+const system = button('⚙   System', () => show('system'), 'nav-item subtle'); system.dataset.page = 'system';
 sidebar.append(brand, nav, spacer, system, themeToggle());
 const workspace = el('main', 'workspace'); root.replaceChildren(sidebar, workspace);
 
@@ -743,7 +686,7 @@ show([...NAV.map(n => n[0]), 'system'].includes(initial) ? initial : 'counter');
 window.addEventListener('hashchange', () => { const p = location.hash.slice(2) as Page; if ([...NAV.map(n => n[0]), 'system'].includes(p)) show(p); });
 window.addEventListener('dragover', e => { if (!(e.target as HTMLElement).closest('.drop-zone')) e.preventDefault(); });
 window.addEventListener('drop', e => { if (!(e.target as HTMLElement).closest('.drop-zone')) e.preventDefault(); });
-void Promise.all([api.get<SystemInfo>('/system'), api.get<typeof capabilities>('/capabilities'), api.get<Uploaded[]>('/files')]).then(([s, c, available]) => {
+void Promise.all([api.get<typeof systemData>('/system'), api.get<typeof capabilities>('/capabilities'), api.get<Uploaded[]>('/files')]).then(([s, c, available]) => {
   systemData = s; capabilities = c;
   files.splice(0, files.length, ...available);
   if (!selected) selected = files[0]?.id || '';

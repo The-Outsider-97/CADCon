@@ -162,8 +162,8 @@ def test_repair_api_preview_red_faces_and_native_sgeo_roundtrip(tmp_path: Path):
     from src.utils import sldc
     package = sldc.loads_package(_call(router, app, 'GET', f'/api/reports/{report["id"]}',
                                        query={"format": "sldc"}).body)
-    assert len(package.assets) == 2
-    assert sum(block['type'] == 'figure' for block in package.document['blocks']) == 2
+    assert len(package.assets) == 3  # CADCon logo, original, and repair screenshot.
+    assert sum(block['type'] == 'figure' for block in package.document['blocks']) == 3
     exported = _call(router, app, 'POST', f'/api/repair/candidates/{candidate["id"]}/export', body={"format": "sgeo"})
     assert exported["export_verified"] is True
     assert exported["filename"] == "open-repaired-hole_fill.sgeo"

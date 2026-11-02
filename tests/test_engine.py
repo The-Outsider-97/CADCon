@@ -108,13 +108,19 @@ def test_sldc_report_roundtrip(tmp_path: Path) -> None:
     package = sldc.loads_package(content)
     assert package.version == "1.1.0"
     assert package.document["title"] == "CADCon Geometry Analysis a"
-    assert len(package.assets) == 1
+    assert len(package.assets) == 2  # CADCon logo plus actual model PNG
     blocks = package.document["blocks"]
     assert any(block["type"] == "figure" and block["section"] == "cadcon-cover" for block in blocks)
     headings = [block["text"] for block in blocks if block["type"] == "heading"]
     assert headings == ["Geometry Summary", "Validation Coverage", "Findings", "Provenance"]
     assert all(block["attributes"]["page_break_before"] for block in blocks if block["type"] == "heading")
     assert package.document["styles"]["paragraph"]["report_heading"]["keep_with_next"] is True
+    sections = package.document["sections"]
+    assert all(s["page"]["margins_mm"]["left"] == s["page"]["margins_mm"]["right"] == 15 for s in sections)
+    assert sections[0].get("header") is None  # Cover stays clean.
+    for section in sections[1:]:
+        assert "{title}" in section["header"]["left"]
+        assert "Generated" in section["header"]["right"]
     toc = [block for block in blocks if "slai.sldc.toc" in block.get("extensions", {})]
     assert len(toc) == len(headings) + 1
     assert toc[0]["extensions"]["slai.sldc.toc"]["role"] == "title"
@@ -288,8 +294,34 @@ def test_comparison_report_sldc(tmp_path: Path) -> None:
     one.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
     two.write_text("v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
     result = {"report_kind": "cadcon.comparison", **engine.compare(one, two)}
-    blob = engine.report_bytes(result, "sldc")
-    assert sldc.loads_package(blob).document["title"] == "CADCon Model Comparison"
+    with pytest.raises(engine.GeometryError, match="both source models"):
+        engine.report_bytes(result, "sldc")
+    blob = engine.report_bytes(result, "sldc", comparison_previews=(_png_bytes(1600, 900), _png_bytes(1200, 900)))
+    package = sldc.loads_package(blob)
+    document = package.document
+    assert document["title"] == "CADCon Model Comparison"
+    assert package.version == "1.1.0"
+    assert len(package.assets) == 3  # CADCon logo and two different model PNGs.
+    blocks = document["blocks"]
+    headings = [b["text"] for b in blocks if b["type"] == "heading"]
+    assert headings == ["Comparison Overview", "Model Information", "Geometry Summary",
+                        "Validation Coverage", "Differences", "Provenance"]
+    toc = [b for b in blocks if "slai.sldc.toc" in b.get("extensions", {})]
+    assert [b["text"] for b in toc[1:]] == headings
+    logo = [b for b in blocks if b["type"] == "figure" and b.get("section") == "cadcon-cover"]
+    assert len(logo) == 1 and logo[0]["figure"]["alt"] == "CADCon application logo"
+    row = next(b for b in blocks if b.get("text") == "\uFFFC  \uFFFC")
+    assert row["section"] == "cadcon-body"
+    spans = row["spans"]
+    assert len(spans) == 2 and all(s["type"] == "image" for s in spans)
+    assert [s["figure"]["width_mm"] for s in spans] == [85, 85]
+    assert spans[0]["figure"]["asset"] != spans[1]["figure"]["asset"]
+    assert blocks.index(row) > next(i for i, b in enumerate(blocks) if b.get("text") == "Differences")
+    assert all(s["page"]["margins_mm"]["left"] == 15 and s["page"]["margins_mm"]["right"] == 15
+               for s in document["sections"])
+    for section in document["sections"][1:]:
+        assert section["header"]["style"] == "report_header"
+        assert "{title}" in section["header"]["left"]
 
 
 def test_opt_in_slai_spatial_nearest(tmp_path: Path) -> None:

@@ -63,6 +63,16 @@ truth for CADCon-specific features.
   and page-break/keep-with-next metadata. SLAI's SLDC 1.1 serializer is the
   sole owner of the package and image assets; browser capture must complete
   before the SLDC export button is enabled.
+- **Comparison SLDC** uses the same native report layout rather than a separate
+  simplified Markdown conversion. Both report types embed the existing CADCon
+  logo on the cover, use A4 content boundaries at 15–195 mm, and include the
+  document title, CADCon version and generation date in the contents/body
+  headers. Comparison reports provide a cover, ToC, overview, source-model
+  information, geometry summary, validation coverage, differences and
+  provenance. After the Differences table, the two actual model PNGs are
+  embedded side by side as native inline SLDC images (85 mm each). Both
+  screenshots must be captured from their associated uploaded files before
+  comparison SLDC export is enabled; JSON remains independently available.
 - **Mesh Repair & Reconstruction** is available under Analysis & Report for
   triangle meshes. The welding tolerance defaults to **Automatic**: CADCon
   tries exact reconstruction first, then tests a bounded set of model-scaled
@@ -83,54 +93,12 @@ truth for CADCon-specific features.
   remain disabled until verified backends are configured. These checks establish
   topological closure, **not** certified solid validity: self-intersections,
   coincident shell overlaps, intentional functional openings, and signed solid
-  volume require further validation. Deterministic repair and validation
-  remain authoritative; optional SLAI agent assistance is described under
-  **Configuration and SLAI agents** below.
-
-  The automatic tolerance is adaptive and scale-invariant. It is derived from
-  the measured boundary-vertex gaps and bounded by a ceiling that depends on
-  `repair.mode`: `conservative` (0.1 % of the model diagonal), `balanced`
-  (0.5 %) or `exploratory` (1 %, never labelled verified-safe). A level is
-  rejected if it collapses triangles or introduces non-manifold edges.
-  Candidates are ranked deterministically and lexicographically on measured
-  values (closed topology, no exploratory risk, then fewer non-manifold edges,
-  boundary edges, degenerate faces and winding conflicts, then smaller vertex
-  displacement and fewer added/removed faces; ranking and a Pareto flag are
-  attached to each candidate) and every candidate states what was measured. No candidate is ever described as a
-  valid solid.
-
-## Configuration and SLAI agents
-
-All behaviour is driven by `configs/cadcon_config.yaml` (override the file with
-`--config` or `CADCON_CONFIG`). Precedence is **command line / programmatic
-overrides > `CADCON_*` environment variables > YAML > built-in defaults**. Every
-key is validated (type, range, unknown keys, duplicate keys, loopback-only host)
-and every key has a runtime consumer; `tests/test_foundation.py` fails if a key
-is declared but nothing reads it. **System → Configuration** shows where values
-came from and *Reload configuration* re-reads the file (an invalid file is
-rejected and the running configuration stays active).
-
-CADCon integrates three SLAI agents through SLAI's own `AgentFactory`; it never
-constructs an agent itself, and no stand-in agent exists:
-
-| Agent | Used for | Evidence class | Notes |
-| --- | --- | --- | --- |
-| Verification | Model-checks the declared postconditions of each repair candidate (open boundary, non-manifold and winding counts do not increase) over a before/after abstraction of *measured* counts | `verified` | Verifies the stated invariants, not the geometry or solid validity |
-| Spatial | Optional rigid registration of two compared meshes (`align_point_clouds` on sampled surface points) | `estimated` | An estimate from samples, not a CAD feature match |
-| Reasoning | Plain-language explanation of a repair diagnosis and, on request, of analysis findings | `ai_assisted` | Advisory; needs the Reasoning Agent's runtime (e.g. PyTorch). Unavailable agents are reported as such |
-
-Agents are loaded lazily on first use, bounded by `agents.default_timeout_seconds`,
-`agents.load_timeout_seconds` and `agents.max_workers`, left alone for
-`agents.failure_cooldown_seconds` after a failure, and released through the
-factory on shutdown. A missing, slow or failing agent never changes a
-deterministic result, never produces invented output and never raises into the
-request: its status (`disabled`, `unavailable`, `timeout`, `failed`,
-`invalid_response`) is reported instead. Evidence classes are `measured`
-(deterministic code), `verified` (a check that ran), `ai_assisted` (an agent
-answered), `estimated` (an approximation, named as such) and `unavailable`.
-Other SLAI agents (Quality, Language, Optimization, …) have no CADCon adapter and
-cannot be enabled; the Quality Agent persists its own store inside the SLAI tree,
-so it is intentionally not connected.
+  volume require further validation. CADCon optionally requests explanations
+  from SLAI's public `AgentFactory` and `ReasoningAgent.perform_task` contract,
+  with an eight-second budget and explicit fallback. An agent may be unavailable
+  when its runtime dependencies or trained/configured capabilities are missing;
+  only successfully returned responses are labeled AI-assisted. Deterministic
+  repair and validation remain authoritative.
 
 ## Verified and conditional format matrix
 
@@ -173,17 +141,16 @@ because it would lose precision, metadata or semantics.
   source records count three vertices/edges per triangle even if positions
   coincide, matching the reporting convention of the reference BIMAP extraction.
   Solid-volume certification is withheld for unclosed or nonmanifold topology.
-- Comparison reports an approximate, point-sampled surface distance and an
-  optional Spatial-Agent registration estimate; it does not provide spatial
-  difference heatmaps or an exact (Hausdorff) equivalence proof. Same
-  counts/bounds alone are never treated as proof of equivalence.
+- Comparison does not yet implement rigid registration, spatial difference
+  heatmaps or surface-distance equivalence proof. Same counts/bounds alone are
+  never treated as proof of equivalence.
 - For native or precision sources, the visible triangle counts are from SLAI
   tessellation and **must not be interpreted as exact B-rep face/edge counts**.
   Only the checks enumerated as executed in a report are certified as run.
 - The SLAI Spatial subsystem is wired to an optional nearest-entity query
-  using native SGEO/SDRW agent DTOs. There is no top-level multi-agent
-  orchestrator; the Verification, Spatial and Reasoning adapters above are the
-  complete integration, and **System → SLAI agents** reports their live state.
+  using native SGEO/SDRW agent DTOs. The top-level multi-agent orchestrator and
+  remaining Language/Reasoning/Quality agents are not yet connected; System
+  explicitly reports this incomplete state.
 - The AI Analysis report chapter is omitted unless a verified, evidence-linked
   agent result is present. No AI prose is simulated. The cover PNG may use a
   50,000-triangle subset for large sources, while all numeric analysis uses the
@@ -209,19 +176,13 @@ py -m pytest -q tests
 npm run build
 ```
 
-Conversions are verified after writing: the output is re-read and its triangle
-count, extents and area (3D) or entity count (2D, informational) are compared with
-the source, and the result is returned as `fidelity` with its evidence class.
-
 For the standalone checkout, ensure `SLAI_ROOT` points to the v2.4 tree or set
 `PYTHONPATH` to that root when running native format tests.
 
 ## Package structure
 
 `engine.py` provides bounded geometry inspection, export routing and analysis;
-`repair.py` the adaptive, policy-driven repair; `utils/` the shared error
-classification, helpers and configuration loader; `slai/bridge/` the agent
-runtime and adapters; `app.py` is the thin shared-server composition root;
-`src/client/` holds the TypeScript/CSS UI. `tools/build.mjs` delegates to SLAI's shared build tool.
+`app.py` is the thin shared-server composition root; `src/client/` holds the
+TypeScript/CSS UI. `tools/build.mjs` delegates to SLAI's shared build tool.
 
 See `doc/USER_GUIDE.md` for the operation flow.
