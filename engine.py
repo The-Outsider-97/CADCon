@@ -19,6 +19,7 @@ from typing import Any
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_TRIANGLES = 600_000
+PREVIEW_TRIANGLE_LIMIT = 50_000
 POLICIES = ("strict", "lossless_where_supported", "allow_approximation", "best_effort")
 THREE_D = {".stl", ".obj", ".sgeo", ".glb", ".ifc"}
 TWO_D = {".sdrw", ".dxf", ".svg", ".dwg"}

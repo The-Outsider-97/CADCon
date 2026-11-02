@@ -3,7 +3,7 @@ export interface Summary { source: { name: string; format: string; size_bytes: n
 export interface Analysis extends Summary { report_kind: string; findings: Array<{ code: string; severity: string; description: string }> }
 export interface Conversion { id: string; source: string; target: string; validated: boolean; warnings: string[]; target_summary: Record<string, unknown>; backend: string; duration_ms: number; source_sha256: string; target_sha256: string; backend_report?: Record<string, unknown> }
 export interface Comparison { report_id: string; status: string; left: Summary; right: Summary; differences: Record<string, { left: unknown; right: unknown }>; note?: string; reason?: string }
-export type Preview = { kind: 'mesh'; vertices: number[][]; faces: number[][]; partial: boolean; total_triangles: number } | { kind: 'svg'; markup: string };
+export type Preview = { kind: 'mesh'; vertices: number[][]; faces: number[][]; partial: boolean; total_triangles: number; preview_limit: number } | { kind: 'svg'; markup: string };
 
 export class Api {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

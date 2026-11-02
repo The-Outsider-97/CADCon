@@ -201,13 +201,14 @@ def build_router():
             svg, _ = doc.to_svg()
             return {"kind": "svg", "markup": svg}
         mesh = run(module.load_mesh, path)
-        limit = 3500
+        limit = module.PREVIEW_TRIANGLE_LIMIT
         faces = mesh.faces[:limit]
         needed = sorted({index for face in faces for index in face})
         remap = {index: i for i, index in enumerate(needed)}
         return {"kind": "mesh", "vertices": [mesh.vertices[i] for i in needed],
                 "faces": [[remap[i] for i in f] for f in faces],
-                "partial": len(mesh.faces) > limit, "total_triangles": len(mesh.faces)}
+                "partial": len(mesh.faces) > limit, "total_triangles": len(mesh.faces),
+                "preview_limit": limit}
 
     @router.route("GET", "/api/outputs/{id}")
     def output(app, req):

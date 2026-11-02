@@ -47,6 +47,7 @@ body { color: var(--text); background: var(--bg); font-family: var(--font-ui); f
 .btn { cursor: pointer; font-family: inherit; }.btn-primary { background: var(--accent); color: var(--on-accent); font-weight: 700; }.btn-outline { background: var(--surface); color: var(--text); }
 .notice { margin: 12px 0; padding: 12px 14px; border-radius: 9px; font-size: 12px; border: 1px solid var(--border); }
 .notice.warning { background: var(--warn-bg); }.notice.success { background: var(--ok-soft); color: var(--ok); }
+.notice.bad { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
 .empty { padding: 32px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 14px; }
 .capability-list { display: grid; gap: 1px; }.capability-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--hairline); padding: 11px 0; font-size: 12px; }
 .capability-row.ready span { color: var(--ok); }.capability-row.disabled span { color: var(--muted); }

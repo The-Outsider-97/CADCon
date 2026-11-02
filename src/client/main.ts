@@ -127,7 +127,7 @@ function viewer(parent: HTMLElement, fileId: string): void {
       canvas.setAttribute('aria-label', 'Interactive 3D model preview; drag to orbit and scroll to zoom');
       container.append(canvas);
       startCanvasPreview(canvas, preview);
-      if (preview.partial) container.append(el('p', 'notice warning', `Preview limited to 3,500 of ${preview.total_triangles.toLocaleString()} triangles; analysis uses the complete file.`));
+      if (preview.partial) container.append(el('p', 'notice warning', `Preview limited to ${preview.preview_limit.toLocaleString()} of ${preview.total_triangles.toLocaleString()} triangles; analysis uses the complete file.`));
       container.append(el('p', 'muted viewer-tip', 'Drag to orbit · Scroll to zoom · Double-click to reset'));
     }
   }).catch(e => { status.textContent = e instanceof Error ? e.message : 'Preview unavailable'; });
@@ -137,42 +137,85 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
   const ctx = canvas.getContext('2d'); if (!ctx) return;
   const points = preview.vertices;
   if (!points.length) return;
-  const center = [0, 1, 2].map(i => (Math.min(...points.map(p => p[i])) + Math.max(...points.map(p => p[i]))) / 2);
-  const span = Math.max(1e-6, ...[0, 1, 2].map(i => Math.max(...points.map(p => p[i])) - Math.min(...points.map(p => p[i]))));
+  // Large STL previews can contain 150k distinct vertex records. Avoid
+  // Math.min(...vertices), which overflows browser argument limits at this size.
+  const minimum = [Infinity, Infinity, Infinity];
+  const maximum = [-Infinity, -Infinity, -Infinity];
+  for (const point of points) {
+    for (let axis = 0; axis < 3; axis++) {
+      minimum[axis] = Math.min(minimum[axis], point[axis]);
+      maximum[axis] = Math.max(maximum[axis], point[axis]);
+    }
+  }
+  const center = minimum.map((value, axis) => (value + maximum[axis]) / 2);
+  const span = Math.max(1e-6, ...minimum.map((value, axis) => maximum[axis] - value));
   let yaw = 0.8, pitch = -0.45, zoom = 1.0, drag = false, lastX = 0, lastY = 0;
-  const render = (): void => {
-    const box = canvas.getBoundingClientRect(); const w = canvas.width = Math.max(240, Math.round(box.width * devicePixelRatio));
-    const h = canvas.height = Math.max(160, Math.round(box.height * devicePixelRatio));
+  let frame = 0, wheelSettled = 0;
+  const render = (interactive: boolean): void => {
+    const box = canvas.getBoundingClientRect();
+    const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+    const w = canvas.width = Math.max(240, Math.round(box.width * pixelRatio));
+    const h = canvas.height = Math.max(160, Math.round(box.height * pixelRatio));
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
-    const c = Math.cos(yaw), s = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const screen = points.map(p => {
+    const cosYaw = Math.cos(yaw), sinYaw = Math.sin(yaw), cosPitch = Math.cos(pitch), sinPitch = Math.sin(pitch);
+    const screen = new Float32Array(points.length * 3);
+    const scale = Math.min(w, h) * zoom;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
       const x = (p[0] - center[0]) / span, y = (p[1] - center[1]) / span, z = (p[2] - center[2]) / span;
-      const xr = c * x - s * z, zr = s * x + c * z;
-      return [w / 2 + xr * Math.min(w, h) * zoom, h / 2 - (cp * y - sp * zr) * Math.min(w, h) * zoom, sp * y + cp * zr];
-    });
-    const sorted = preview.faces.map(face => ({ face, z: face.reduce((a, i) => a + screen[i][2], 0) / 3 })).sort((a, b) => a.z - b.z);
-    ctx.lineWidth = Math.max(0.5, devicePixelRatio * 0.55);
-    for (const { face } of sorted) {
-      const a = screen[face[0]], b = screen[face[1]], c = screen[face[2]];
-      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.closePath();
-      const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+      const xr = cosYaw * x - sinYaw * z, zr = sinYaw * x + cosYaw * z;
+      const offset = i * 3;
+      screen[offset] = w / 2 + xr * scale;
+      screen[offset + 1] = h / 2 - (cosPitch * y - sinPitch * zr) * scale;
+      screen[offset + 2] = sinPitch * y + cosPitch * zr;
+    }
+    // Full geometry is shown when stationary. During orbit/zoom, use an
+    // evenly distributed face subset so 50k Canvas2D paths cannot stall input.
+    const stride = interactive ? Math.max(1, Math.ceil(preview.faces.length / 8_000)) : 1;
+    const sorted: Array<{ index: number; z: number }> = [];
+    for (let index = 0; index < preview.faces.length; index += stride) {
+      const [a, b, c] = preview.faces[index];
+      sorted.push({ index, z: (screen[a * 3 + 2] + screen[b * 3 + 2] + screen[c * 3 + 2]) / 3 });
+    }
+    sorted.sort((a, b) => a.z - b.z);
+    ctx.lineWidth = Math.max(0.5, pixelRatio * 0.5);
+    for (const { index } of sorted) {
+      const [a, b, c] = preview.faces[index];
+      const ax = screen[a * 3], ay = screen[a * 3 + 1];
+      const bx = screen[b * 3], by = screen[b * 3 + 1];
+      const cx = screen[c * 3], cy = screen[c * 3 + 1];
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.closePath();
+      const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
       ctx.fillStyle = cross >= 0 ? 'rgba(214,179,0,.55)' : 'rgba(130,148,170,.60)';
-      ctx.fill(); ctx.strokeStyle = 'rgba(6,12,22,.26)'; ctx.stroke();
+      ctx.fill();
+      if (!interactive) { ctx.strokeStyle = 'rgba(6,12,22,.26)'; ctx.stroke(); }
     }
   };
+  const schedule = (interactive: boolean): void => {
+    if (frame) window.cancelAnimationFrame(frame);
+    frame = window.requestAnimationFrame(() => {
+      frame = 0;
+      if (canvas.isConnected) render(interactive);
+    });
+  };
   canvas.addEventListener('pointerdown', e => { drag = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener('pointerup', () => { drag = false; });
+  canvas.addEventListener('pointerup', () => { drag = false; schedule(false); });
+  canvas.addEventListener('pointercancel', () => { drag = false; schedule(false); });
   canvas.addEventListener('pointermove', e => {
     if (!drag) return;
     yaw += (e.clientX - lastX) * .012; pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - lastY) * .012));
-    lastX = e.clientX; lastY = e.clientY; render();
+    lastX = e.clientX; lastY = e.clientY; schedule(true);
   });
-  canvas.addEventListener('wheel', e => { e.preventDefault(); zoom = Math.max(.25, Math.min(8, zoom * (e.deltaY > 0 ? .9 : 1.1))); render(); }, { passive: false });
-  canvas.addEventListener('dblclick', () => { yaw = .8; pitch = -.45; zoom = 1; render(); });
-  const resize = new ResizeObserver(() => { if (canvas.isConnected) render(); });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault(); zoom = Math.max(.25, Math.min(8, zoom * (e.deltaY > 0 ? .9 : 1.1)));
+    schedule(true); window.clearTimeout(wheelSettled);
+    wheelSettled = window.setTimeout(() => schedule(false), 180);
+  }, { passive: false });
+  canvas.addEventListener('dblclick', () => { yaw = .8; pitch = -.45; zoom = 1; schedule(false); });
+  const resize = new ResizeObserver(() => schedule(false));
   resize.observe(canvas);
-  viewerDisposers.push(() => resize.disconnect());
-  render();
+  viewerDisposers.push(() => { resize.disconnect(); window.cancelAnimationFrame(frame); window.clearTimeout(wheelSettled); });
+  schedule(false);
 }
 
 function counter(main: HTMLElement): void {
@@ -215,13 +258,29 @@ function converter(main: HTMLElement): void {
   fields.append(declaredUnit());
   const output = el('div');
   const go = button('Convert file', () => {
-    if (!chosen.value) { notice('Choose a source file', true); return; }
+    if (!chosen.value || !target.value) { notice('Choose a source and an available output format', true); return; }
     void action(async () => {
-      const res = await api.post<Conversion>('/convert', { id: chosen.value, format: target.value, policy: policy.value, unit: assumedUnit });
-      output.replaceChildren(el('div', 'notice success', `Validated: ${res.source} → ${res.target}`));
-      output.append(el('p', 'muted', `${res.backend} · ${res.duration_ms} ms · SHA-256: ${res.target_sha256.slice(0, 18)}…`));
-      if (res.warnings.length) output.append(el('div', 'notice warning', res.warnings.join(' · ')));
-      output.append(button('Download converted file', () => { void api.download('/outputs/' + res.id, res.target).catch(e => notice(e.message, true)); }, 'btn-primary'));
+      go.disabled = true;
+      const sourceName = files.find(file => file.id === chosen.value)?.name || 'the selected file';
+      output.replaceChildren(el('div', 'notice', `Converting ${sourceName} to ${target.value.toUpperCase()}… large meshes can take a while. Please wait for validation.`));
+      try {
+        const res = await api.post<Conversion>('/convert', { id: chosen.value, format: target.value, policy: policy.value, unit: assumedUnit });
+        output.replaceChildren(el('div', 'notice success', `Converted and validated: ${res.source} → ${res.target}`));
+        output.append(el('p', 'muted', `${res.backend} · ${res.duration_ms} ms · SHA-256: ${res.target_sha256.slice(0, 18)}…`));
+        if (res.warnings.length) output.append(el('div', 'notice warning', res.warnings.join(' · ')));
+        const download = () => api.download('/outputs/' + res.id, res.target);
+        output.append(button('Download ' + res.target, () => { void download().catch(e => notice(e.message, true)); }, 'btn-primary'));
+        try {
+          await download();
+          output.append(el('p', 'muted', 'Browser download initiated. Use the button above if it was blocked.'));
+        } catch (error) {
+          output.append(el('div', 'notice warning', `Conversion succeeded, but the download could not start: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      } catch (error) {
+        output.replaceChildren(el('div', 'notice bad', `Conversion failed: ${error instanceof Error ? error.message : String(error)}`));
+      } finally {
+        go.disabled = false;
+      }
     });
   }, 'btn-primary');
   panel.append(fields, explanation, go, output); main.append(panel);

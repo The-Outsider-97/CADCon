@@ -37,7 +37,7 @@ truth for CADCon-specific features.
 
 - Secure local UI with Counter, Converter, Analysis & Report, Compare, and System.
 - Dark/light mode, local drag-and-drop import, basic 2D SVG and interactive 3D
-  software-rendered previews (3,500-triangle display cap; full-file analysis).
+  software-rendered previews (50,000-triangle display cap; full-file analysis).
 - OBJ triangle/planar-quad inspection and ASCII/binary STL inspection.
 - SGEO, SDRW, GLB and supported SVG/DXF interchange through SLAI spatial APIs.
 - The Converter target selector follows the runtime's directed capability
@@ -108,7 +108,9 @@ because it would lose precision, metadata or semantics.
   animation/assembly semantics remain development work.
 - The side-by-side compare previews are individually navigable; synchronized
   camera controls, transparency overlays and difference heatmaps are not yet
-  implemented. The renderer is a deliberately bounded software 3D preview.
+  implemented. The renderer is a deliberately bounded software 3D preview;
+  interaction uses an evenly distributed lower-detail rendering pass, then
+  redraws the full preview after motion settles.
 
 No unsupported format pair is advertised as a verified conversion. Source
 files are never overwritten by conversion. All operations use the shared
