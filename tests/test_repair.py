@@ -30,6 +30,16 @@ def facet_soup(mesh: engine.Mesh) -> engine.Mesh:
     return engine.Mesh(points, triangles, unit=mesh.unit)
 
 
+def cube_with_small_seam() -> engine.Mesh:
+    mesh = facet_soup(cube())
+    # The upper surface is offset by 0.0001 mm, leaving a near-coincident
+    # seam that exact coordinate welding cannot close.
+    for face in mesh.faces[2:4]:
+        for idx in face:
+            mesh.vertices[idx][2] += 0.0001
+    return mesh
+
+
 def test_exact_weld_recognizes_closed_facet_soup_without_new_faces():
     source = facet_soup(cube())
     diagnosis = repair.diagnose(source)
@@ -88,6 +98,29 @@ def test_invalid_welding_and_unavailable_methods_not_faked():
     assert repair.candidates(cube()) == []
 
 
+def test_recommended_welding_tolerance_finds_real_near_coincident_seam():
+    source = cube_with_small_seam()
+    exact = repair.validate(repair.weld(source))
+    assert exact["boundary_edges"] > 0
+    suggestion = repair.recommend_tolerance(source)
+    assert 0 < suggestion["tolerance"] <= suggestion["model_diagonal"] * .001
+    assert suggestion["expected_boundary_edges"] == 0
+    selected = repair.validate(repair.weld(source, suggestion["tolerance"]))
+    assert selected["boundary_edges"] == 0
+    assert selected["nonmanifold_edges"] == 0
+    assert any(c.strategy == "tolerant_weld" for c in repair.candidates(source, suggestion["tolerance"]))
+
+
+def test_auto_tolerance_stays_exact_when_welding_cannot_help():
+    assert repair.recommend_tolerance(facet_soup(cube()))["tolerance"] == 0
+    missing_top = facet_soup(cube())
+    missing_top.faces = missing_top.faces[:2] + missing_top.faces[4:]
+    suggestion = repair.recommend_tolerance(missing_top)
+    assert suggestion["tolerance"] == 0
+    assert suggestion["expected_boundary_edges"] > 0
+    assert "genuine holes" in suggestion["reason"]
+
+
 def _call(router, state, method, path, *, body=None, query=None):
     from applications.tools.server.router import Request
     action, params = router.match(method, path)
@@ -110,6 +143,8 @@ def test_repair_api_preview_red_faces_and_native_sgeo_roundtrip(tmp_path: Path):
 
     info = _call(router, app, 'POST', '/api/repair/analyze', body={"id": "source-id"})
     assert info["diagnosis"]["reconstructed"]["boundary_edges"] == 4
+    assert info["diagnosis"]["tolerance_mode"] == "automatic"
+    assert info["diagnosis"]["recommendation"]["tolerance"] == 0
     result = _call(router, app, 'POST', '/api/repair/suggest', body={"id": "source-id", "use_agents": False})
     assert result["agents"]["status"] == "disabled"
     json_response = _call(router, app, 'GET', f'/api/reports/{report["id"]}', query={"format": "json"})
@@ -144,6 +179,28 @@ def test_repair_api_preview_red_faces_and_native_sgeo_roundtrip(tmp_path: Path):
     record = sg.snapshot().objects[0]["metadata"]["cadcon:repair"]
     assert record["strategy"] == "hole_fill"
     assert record["added_face_indices"] == [10, 11]
+
+
+def test_repair_api_auto_tolerance_and_manual_override(tmp_path: Path):
+    app = cadapp.CADCon(tmp_path)
+    router = cadapp.build_router()
+    source = tmp_path / "seam.obj"
+    source.write_bytes(engine._obj_bytes(cube_with_small_seam()))
+    app.files["seam"] = source
+    app.original_names["seam"] = source.name
+    exact = _call(router, app, 'POST', '/api/repair/analyze',
+                  body={"id": "seam", "tolerance": 0})["diagnosis"]
+    assert exact["tolerance_mode"] == "manual"
+    assert exact["reconstructed"]["boundary_edges"] > 0
+    automatic = _call(router, app, 'POST', '/api/repair/analyze',
+                      body={"id": "seam", "tolerance": "auto"})["diagnosis"]
+    assert automatic["tolerance_mode"] == "automatic"
+    assert automatic["tolerance"] > 0
+    assert automatic["reconstructed"]["boundary_edges"] == 0
+    variants = _call(router, app, 'POST', '/api/repair/suggest',
+                     body={"id": "seam", "use_agents": False})
+    assert variants["diagnosis"]["tolerance"] == automatic["tolerance"]
+    assert any(item["strategy"] == "tolerant_weld" for item in variants["candidates"])
 
 
 def test_large_candidate_preview_reserves_red_face_capacity(tmp_path):

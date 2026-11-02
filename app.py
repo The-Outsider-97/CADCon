@@ -109,6 +109,28 @@ def build_router():
             raise BadRequest(f"The model preview is invalid: {exc}") from exc
         return image, width, height
 
+    def repair_tolerance(mesh, requested):
+        recommendation = run(repairs.recommend_tolerance, mesh)
+        if requested is None or requested == "auto" or requested == "":
+            return recommendation["tolerance"], "automatic", recommendation
+        if type(requested) not in (float, int):
+            raise BadRequest("Welding tolerance must be a number or 'auto'")
+        value = float(requested)
+        if not 0 <= value < float("inf"):
+            raise BadRequest("Welding tolerance must be finite and non-negative")
+        return value, "manual", recommendation
+
+    def repair_diagnosis(mesh, requested):
+        tolerance, mode, recommendation = repair_tolerance(mesh, requested)
+        try:
+            result = run(repairs.diagnose, mesh, tolerance)
+        except BadRequest as exc:
+            raise BadRequest(f"{exc}. Try Automatic tolerance; the suggested value is "
+                             f"{recommendation['tolerance']:.6g} {mesh.unit or 'source units'}") from exc
+        result["tolerance_mode"] = mode
+        result["recommendation"] = recommendation
+        return result
+
     @router.route("GET", "/api/health")
     def health(app, req):
         return {"application": "CADCon", "version": VERSION, "status": "ready"}
@@ -206,11 +228,8 @@ def build_router():
         data = req.json()
         source_id = str(data.get("id", ""))
         path = app.get_file(source_id)
-        tolerance = data.get("tolerance", 0)
-        if not isinstance(tolerance, (float, int)):
-            raise BadRequest("Tolerance must be a number")
         mesh = run(module.load_mesh, path, unit=data.get("unit", "mm"))
-        diagnosis = run(repairs.diagnose, mesh, float(tolerance))
+        diagnosis = repair_diagnosis(mesh, data.get("tolerance", "auto"))
         with app.lock:
             app.repair_diagnoses[source_id] = diagnosis
         return {"diagnosis": diagnosis, "capabilities": repairs.capability_info()}
@@ -220,18 +239,18 @@ def build_router():
         data = req.json()
         source_id = str(data.get("id", ""))
         path = app.get_file(source_id)
-        tol = data.get("tolerance", 0)
         limit = data.get("max_candidates", 5)
         agent_enabled = data.get("use_agents", True)
-        if not isinstance(tol, (float, int)) or not isinstance(limit, int):
-            raise BadRequest("Tolerance and candidate count must be numeric")
+        if type(limit) is not int:
+            raise BadRequest("Candidate count must be an integer")
         if not isinstance(agent_enabled, bool):
             raise BadRequest("use_agents must be a Boolean")
         mesh = run(module.load_mesh, path, unit=data.get("unit", "mm"))
-        diagnosis = run(repairs.diagnose, mesh, float(tol))
+        diagnosis = repair_diagnosis(mesh, data.get("tolerance", "auto"))
+        tol = diagnosis["tolerance"]
         if len(mesh.faces) > 200_000:
             limit = min(limit, 2)  # Bound the in-memory candidate working set.
-        generated = run(repairs.candidates, mesh, float(tol), limit)
+        generated = run(repairs.candidates, mesh, tol, limit)
         original_name = app.original_names.get(source_id, path.name)
         source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         outputs = []

@@ -17,6 +17,9 @@ except ImportError:  # Direct run_cadcon.py launcher
 
 MAX_PATCH_EDGES = 128
 MAX_DIAGNOSTIC_LOOPS = 256
+# A bounded search, from nearly exact stitching to at most 0.1% of the
+# model diagonal.  Larger values remain an explicit user decision.
+AUTO_WELD_FRACTIONS = (1e-7, 1e-6, 1e-5, 1e-4, 1e-3)
 
 
 @dataclass
@@ -170,6 +173,69 @@ def validate(mesh: Mesh) -> dict[str, Any]:
         "status": "topologically_closed_geometry_unverified" if closed and oriented
                   else "still_open_or_nonmanifold",
     }
+
+
+def recommend_tolerance(mesh: Mesh) -> dict[str, Any]:
+    """Find a conservative, evidence-backed weld tolerance for an input mesh.
+
+    Only consider tolerance welding if exact matching leaves actual boundary
+    edges.  Reject levels that collapse faces or create non-manifold edges;
+    never mistake a missing surface for a small coordinate discrepancy.
+    """
+    exact = weld(mesh)
+    baseline = validate(exact)
+    diagonal = _length([max(vertex[axis] for vertex in mesh.vertices) -
+                        min(vertex[axis] for vertex in mesh.vertices) for axis in range(3)]) if mesh.vertices else 0.0
+    recommendation = {
+        "tolerance": 0.0, "unit": mesh.unit,
+        "model_diagonal": diagonal, "evaluated_levels": 0,
+        "baseline_boundary_edges": baseline["boundary_edges"],
+        "expected_boundary_edges": baseline["boundary_edges"],
+        "expected_nonmanifold_edges": baseline["nonmanifold_edges"],
+        "reason": "Exact-coordinate reconstruction is the safest starting point.",
+    }
+    if not baseline["boundary_edges"]:
+        recommendation["reason"] = (
+            "Exact welding already removes all indexed boundary edges. A larger tolerance "
+            "would not close additional holes and could merge intentional features."
+        )
+        return recommendation
+    if diagonal <= 0:
+        recommendation["reason"] = "Model dimensions do not permit a meaningful automatic tolerance."
+        return recommendation
+
+    best = baseline
+    for fraction in AUTO_WELD_FRACTIONS:
+        tolerance = diagonal * fraction
+        recommendation["evaluated_levels"] += 1
+        try:
+            checks = validate(weld(mesh, tolerance))
+        except GeometryError:
+            # Collapsed triangles or another invalid remap: never recommend it.
+            continue
+        if (checks["nonmanifold_edges"] > baseline["nonmanifold_edges"] or
+                checks["degenerate_faces"] > baseline["degenerate_faces"] or
+                checks["inconsistent_winding_edges"] > baseline["inconsistent_winding_edges"]):
+            continue
+        if checks["boundary_edges"] < best["boundary_edges"]:
+            best = checks
+            recommendation.update(tolerance=tolerance,
+                                  expected_boundary_edges=checks["boundary_edges"],
+                                  expected_nonmanifold_edges=checks["nonmanifold_edges"])
+            if not checks["boundary_edges"]:
+                break
+    if recommendation["tolerance"]:
+        recommendation["reason"] = (
+            "A model-scaled tolerance reduced reconstructed boundary edges without "
+            "introducing new non-manifold or degenerate edges in the checks performed. "
+            "Review intentional seams before exporting."
+        )
+    else:
+        recommendation["reason"] = (
+            "No safe automatic welding level improved the boundary topology. "
+            "The model may contain genuine holes or intentional openings; inspect repair patches."
+        )
+    return recommendation
 
 
 def diagnose(mesh: Mesh, tolerance: float = 0.0) -> dict[str, Any]:

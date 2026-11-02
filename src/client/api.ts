@@ -6,7 +6,7 @@ export interface Comparison { report_id: string; status: string; left: Summary; 
 export type Preview = { kind: 'mesh'; vertices: number[][]; faces: number[][]; new_faces?: number[]; partial: boolean; total_triangles: number; preview_limit: number } | { kind: 'svg'; markup: string };
 export interface RepairValidation { boundary_edges: number; nonmanifold_edges: number; inconsistent_winding_edges: number; manifold_face_components: number; topologically_closed: boolean; watertight: boolean; solid_validity: string; status: string; triangles: number; vertices: number }
 export interface RepairCandidate { id: string; strategy: string; label: string; explanation: string; added_faces: number; validation: RepairValidation }
-export interface RepairDiagnosis { source: RepairValidation; reconstructed: RepairValidation; coincident_records: number; boundary_loops: Array<{edges: number; perimeter: number}>; interpretation: string; validation_limitations: string[] }
+export interface RepairDiagnosis { source: RepairValidation; reconstructed: RepairValidation; tolerance: number; tolerance_mode?: 'automatic' | 'manual'; recommendation?: { tolerance: number; unit: string; model_diagonal: number; evaluated_levels: number; baseline_boundary_edges: number; expected_boundary_edges: number; expected_nonmanifold_edges: number; reason: string }; coincident_records: number; boundary_loops: Array<{edges: number; perimeter: number}>; interpretation: string; validation_limitations: string[] }
 export interface RepairResult { diagnosis: RepairDiagnosis; candidates: RepairCandidate[]; agents: {status: string; reason?: string; interpretation?: string; agent?: string} }
 
 export class Api {

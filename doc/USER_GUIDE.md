@@ -18,8 +18,13 @@
    contents, geometry summary, validation coverage, findings, and provenance.
    Optional AI Analysis appears only with evidence-backed agent output.
    For an open or non-manifold triangle mesh, open **Mesh Repair &
-   Reconstruction** below the analysis warning. Choose the welding tolerance
-   (zero means exact coordinates), click **Analyze Repair Options**, review
+   Reconstruction** below the analysis warning. Leave **Welding tolerance**
+   empty for automatic selection (recommended), enter `0` to force exact
+   coordinate matching, or provide a manual tolerance in the source units.
+   Click **Analyze Repair Options** to see CADCon's suggested tolerance,
+   why it was chosen, and the reconstructed topology. CADCon will retain exact
+   welding if larger tolerances do not help; it will not silently merge
+   intentional features beyond its bounded automatic tolerance search. Review
    both source-index and reconstructed topology, and then click **Generate
    Repair Variants**. The candidate viewer colors genuinely added faces red;
    topology-only changes add no red surfaces. Candidate buttons show measured

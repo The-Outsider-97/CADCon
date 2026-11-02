@@ -263,9 +263,11 @@ function startCanvasPreview(canvas: HTMLCanvasElement, preview: Extract<Preview,
 function repairPanel(fileId: string, reportId: string): HTMLElement {
   const panel = card('Mesh Repair & Reconstruction');
   panel.append(el('p', 'muted', 'Diagnose welded topology before generating repair surfaces. CADCon never overwrites the original model.'));
-  const toleranceLabel = el('label', 'field'); toleranceLabel.append(el('span', '', 'Welding tolerance (source units; 0 = exact)'));
-  const tolerance = el('input', 'input'); tolerance.type = 'number'; tolerance.min = '0'; tolerance.step = '0.0001'; tolerance.value = '0';
-  toleranceLabel.append(tolerance);
+  const toleranceLabel = el('label', 'field'); toleranceLabel.append(el('span', '', 'Welding tolerance (source units)'));
+  const tolerance = el('input', 'input'); tolerance.type = 'number'; tolerance.min = '0'; tolerance.step = 'any';
+  tolerance.placeholder = 'Automatic (recommended)';
+  tolerance.setAttribute('aria-label', 'Optional manual welding tolerance; leave empty for automatic recommendation');
+  toleranceLabel.append(tolerance, el('span', 'muted', 'Leave blank to test safe model-scaled tolerances automatically. Enter 0 for exact matching or a value to override.'));
   const agentLabel = el('label', 'repair-agent-toggle');
   const agentToggle = el('input'); agentToggle.type = 'checkbox'; agentToggle.checked = true;
   agentLabel.append(agentToggle, el('span', '', 'Use SLAI Reasoning Agent when available (optional)'));
@@ -274,7 +276,8 @@ function repairPanel(fileId: string, reportId: string): HTMLElement {
   const variants = el('div', 'repair-variants');
   const display = el('div');
 
-  function settings(): { id: string; unit: string; tolerance: number } {
+  function settings(): { id: string; unit: string; tolerance: number | 'auto' } {
+    if (!tolerance.value.trim()) return { id: fileId, unit: assumedUnit, tolerance: 'auto' };
     const value = Number(tolerance.value);
     if (!Number.isFinite(value) || value < 0) throw new Error('Welding tolerance must be finite and non-negative');
     return { id: fileId, unit: assumedUnit, tolerance: value };
@@ -283,6 +286,19 @@ function repairPanel(fileId: string, reportId: string): HTMLElement {
   function diagnosticView(data: RepairDiagnosis): void {
     const cardEl = card('Reconstructed topology');
     cardEl.append(el('p', 'muted', data.interpretation));
+    const suggested = data.recommendation;
+    if (suggested) {
+      const show = (value: number): string => value === 0 ? '0 (exact)' : value.toPrecision(5);
+      const used = `${show(data.tolerance)} ${suggested.unit || 'source units'}`;
+      const proposed = `${show(suggested.tolerance)} ${suggested.unit || 'source units'}`;
+      cardEl.append(el('p', 'notice', `${data.tolerance_mode === 'automatic' ? 'Automatically selected' : 'Manual'} tolerance: ${used}. Recommended: ${proposed}. ${suggested.reason}`));
+      if (data.tolerance_mode !== 'automatic' && data.tolerance !== suggested.tolerance) {
+        cardEl.append(button('Switch to recommended tolerance', () => {
+          tolerance.value = '';
+          notice('Automatic tolerance selected. Run Analyze Repair Options again to update the diagnosis.');
+        }, 'btn-outline'));
+      }
+    }
     const original = data.source, updated = data.reconstructed;
     const matrix = el('div', 'stats-grid');
     matrix.append(stat('Source-index boundary edges', original.boundary_edges),

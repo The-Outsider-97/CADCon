@@ -64,8 +64,14 @@ truth for CADCon-specific features.
   sole owner of the package and image assets; browser capture must complete
   before the SLDC export button is enabled.
 - **Mesh Repair & Reconstruction** is available under Analysis & Report for
-  triangle meshes. It compares source-index topology with exact or optional
-  tolerance-welded topology, diagnoses boundary loops and non-manifold edges,
+  triangle meshes. The welding tolerance defaults to **Automatic**: CADCon
+  tries exact reconstruction first, then tests a bounded set of model-scaled
+  tolerances only if boundary edges remain. It recommends the smallest tested
+  value that achieves the best observed boundary improvement without new non-manifold
+  edges or degenerate faces; a manual value or explicit zero remains available.
+  If no safe tolerance helps, CADCon explains that real openings may need
+  surface repair. It compares source-index and reconstructed topology,
+  diagnoses boundary loops and non-manifold edges,
   and builds actual geometry for supported conservative strategies: vertex
   welding, separation of touching manifold shells, triangulated planar holes,
   and convex planar caps. Added faces are red in the interactive 3D preview;
