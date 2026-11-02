@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import errno
 import hashlib
 import importlib
@@ -11,11 +12,17 @@ import struct
 import sys
 import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 APP_DIR = Path(__file__).resolve().parent
 VERSION = "1.0.0-dev"
+
+
+def _module(name: str):
+    """Import a CADCon module in either layout (``applications.CADCon.x`` or flat ``x``)."""
+    return importlib.import_module(f"{__package__}.{name}" if __package__ else name)
 
 
 def _activate_slai(explicit: str | None) -> Path | None:
@@ -34,13 +41,17 @@ def _activate_slai(explicit: str | None) -> Path | None:
 
 
 class CADCon:
-    def __init__(self, data_dir: Path, dwg_executable: str | None = None, slai_root: Path | None = None) -> None:
+    def __init__(self, data_dir: Path, dwg_executable: str | None = None, slai_root: Path | None = None, config: Any = None) -> None:
+        self.lock = threading.RLock()
+        self.analysis_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+        self.cache_stats = {"hits": 0, "misses": 0}
+        self.apply_config(config if config is not None else _module("utils.config_loader").get_config())
         self.data_dir = data_dir
         self.upload_dir = data_dir / "uploads"
         self.output_dir = data_dir / "outputs"
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.dwg_executable = dwg_executable
+        self.dwg_executable = dwg_executable or self.config.get("conversion.dwg_executable")
         self.slai_root = slai_root
         self.files: dict[str, Path] = {}
         self.original_names: dict[str, str] = {}
@@ -52,7 +63,43 @@ class CADCon:
         self.repair_candidates: dict[str, tuple[str, Any, str, str]] = {}
         self.repair_diagnoses: dict[str, dict[str, Any]] = {}
         self.output_names: dict[str, str] = {}
-        self.lock = threading.RLock()
+
+    def apply_config(self, config: Any) -> None:
+        """Make ``config`` the live configuration: engine limits, repair settings and the agent runtime all follow it."""
+        self.config = config
+        engine = _module("engine")
+        engine.configure(max_source_bytes=config.get("files.max_source_bytes"), max_triangles=config.get("geometry.max_triangles"),
+                         preview_triangle_limit=config.get("visualization.preview_triangle_limit"))
+        self.settings = _module("repair").RepairSettings.from_config(config)
+        self.runtime = _module("slai.bridge.agents").get_runtime()
+        self.runtime.set_config(config)
+        self.runtime.reset_cooldown()
+        with self.lock:
+            self.analysis_cache.clear()
+
+    def cached(self, kind: str, path: Path, unit: str, build: Any) -> dict[str, Any]:
+        """Bounded LRU of inspection/analysis results keyed by file identity and unit (``performance.analysis_cache_entries``)."""
+        size = int(self.config.get("performance.analysis_cache_entries"))
+        if size <= 0:
+            return build()
+        stat = path.stat()
+        key = (kind, str(path), stat.st_size, stat.st_mtime_ns, unit)
+        with self.lock:
+            if key in self.analysis_cache:
+                self.analysis_cache.move_to_end(key)
+                self.cache_stats["hits"] += 1
+                return copy.deepcopy(self.analysis_cache[key])
+        value = build()
+        with self.lock:
+            self.cache_stats["misses"] += 1
+            self.analysis_cache[key] = copy.deepcopy(value)
+            while len(self.analysis_cache) > size:
+                self.analysis_cache.popitem(last=False)
+        return value
+
+    def close(self) -> None:
+        """Release the SLAI agents CADCon loaded (through the SLAI AgentFactory)."""
+        _module("slai.bridge.agents").shutdown_runtime()
 
     def get_file(self, identity: str) -> Path:
         from applications.tools.errors import NotFound
@@ -71,29 +118,33 @@ def build_router():
     from src.utils.spatial_formats.common.errors import SpatialFormatError
     module = importlib.import_module(f"{__package__}.engine" if __package__ else "engine")
     repairs = importlib.import_module(f"{__package__}.repair" if __package__ else "repair")
-    agent_bridge = importlib.import_module(f"{__package__}.slai.bridge.agents" if __package__ else "slai.bridge.agents")
+    agent_bridge = _module("slai.bridge.agents")
+    adapters = _module("slai.bridge.adapters")
+    errors = _module("utils.cadcon_errors")
+    helpers_module = _module("utils.cadcon_helpers")
+    config_loader = _module("utils.config_loader")
     router = Router()
+
+    def unit_of(app, data):
+        unit = data.get("unit", app.config.get("geometry.default_unit"))
+        if not isinstance(unit, str):
+            raise BadRequest("Unit must be a text value such as 'mm'")
+        return unit
 
     def run(action, *args, **kwargs):
         try:
             return action(*args, **kwargs)
-        except module.GeometryError as exc:
-            raise BadRequest(str(exc)) from exc
-        except SpatialFormatError as exc:
-            raise BadRequest(str(exc)) from exc
-        except SLDCError as exc:
-            raise BadRequest(f"The native SLDC report is invalid: {exc}") from exc
-        except FileExistsError as exc:
-            raise BadRequest("An output file with that name already exists") from exc
-        except ImportError as exc:
-            raise BadRequest(f"An optional CAD backend is unavailable: {exc}") from exc
-        except ValueError as exc:
-            raise BadRequest(str(exc)) from exc
+        except Exception as exc:
+            mapped = errors.classify_exception(exc)  # expected input/capability conditions only; real defects propagate unchanged
+            if mapped is None or mapped is exc:
+                raise
+            raise mapped from exc
 
-    def read_png_preview(req):
+    def read_png_preview(req, app):
         from src.utils import sldc
-        if not req.length or not 0 < req.length <= 8 * 1024 * 1024:
-            raise LimitExceeded("PNG preview must be between 1 byte and 8 MiB")
+        limit_bytes = int(app.config.get("reporting.max_preview_bytes"))
+        if not req.length or not 0 < req.length <= limit_bytes:
+            raise LimitExceeded(f"PNG preview must be between 1 byte and {helpers_module.format_bytes(limit_bytes)}")
         image = req.stream.read(req.length) if req.stream else b""
         req._read = True
         if (len(image) != req.length or len(image) < 45 or
@@ -109,8 +160,8 @@ def build_router():
             raise BadRequest(f"The model preview is invalid: {exc}") from exc
         return image, width, height
 
-    def repair_tolerance(mesh, requested):
-        recommendation = run(repairs.recommend_tolerance, mesh)
+    def repair_tolerance(app, mesh, requested):
+        recommendation = run(repairs.recommend_tolerance, mesh, app.settings)
         if requested is None or requested == "auto" or requested == "":
             return recommendation["tolerance"], "automatic", recommendation
         if type(requested) not in (float, int):
@@ -120,10 +171,10 @@ def build_router():
             raise BadRequest("Welding tolerance must be finite and non-negative")
         return value, "manual", recommendation
 
-    def repair_diagnosis(mesh, requested):
-        tolerance, mode, recommendation = repair_tolerance(mesh, requested)
+    def repair_diagnosis(app, mesh, requested):
+        tolerance, mode, recommendation = repair_tolerance(app, mesh, requested)
         try:
-            result = run(repairs.diagnose, mesh, tolerance)
+            result = run(repairs.diagnose, mesh, tolerance, app.settings)
         except BadRequest as exc:
             raise BadRequest(f"{exc}. Try Automatic tolerance; the suggested value is "
                              f"{recommendation['tolerance']:.6g} {mesh.unit or 'source units'}") from exc
@@ -133,25 +184,60 @@ def build_router():
 
     @router.route("GET", "/api/health")
     def health(app, req):
-        return {"application": "CADCon", "version": VERSION, "status": "ready"}
+        return {"application": app.config.get("application.name"), "version": VERSION, "status": "ready"}
 
     @router.route("GET", "/api/capabilities")
     def capabilities(app, req):
         return module.capabilities(dwg_executable=app.dwg_executable)
 
+    def agent_report(app, probe=False):
+        return [app.runtime.health(key, probe=probe) for key in config_loader.INTEGRATED_AGENTS]
+
+    def config_report(app):
+        development = app.config.get("application.mode") == "development"
+        return {"mode": app.config.get("application.mode"), "diagnostics": app.config.diagnostics(show_path=development),
+                "values": app.config.to_dict(), "workflows": {w: list(app.config.route(w)) for w in config_loader.WORKFLOWS}}
+
     @router.route("GET", "/api/system")
     def system(app, req):
-        return {"version": VERSION, "python": sys.version.split()[0],
-                "slai_root": str(app.slai_root) if app.slai_root else None,
+        engine_limits = module.limits()
+        return {"version": VERSION, "python": sys.version.split()[0], "mode": app.config.get("application.mode"),
+                "slai_root": str(app.slai_root) if app.slai_root and app.config.get("application.mode") == "development" else bool(app.slai_root),
                 "dwg_backend": bool(app.dwg_executable),
-                "uploaded_files": len(app.files), "outputs": len(app.outputs),
-                "agents": {"spatial_query": "opt-in via SLAI SpatialQueries",
-                           "orchestrated_agent_workflows": "not_connected"}}
+                "uploaded_files": len(app.files), "outputs": len(app.outputs), "limits": engine_limits,
+                "configuration": app.config.diagnostics(), "repair": repairs.capability_info(app.settings),
+                "cache": {**app.cache_stats, "entries": len(app.analysis_cache), "capacity": app.config.get("performance.analysis_cache_entries")},
+                "agents": {"enabled": app.config.get("agents.enabled"), "integrations": agent_report(app),
+                           "workflows": {w: list(app.config.route(w)) for w in config_loader.WORKFLOWS},
+                           "metrics": app.runtime.metrics(),
+                           "not_integrated": "Other SLAI agents have no CADCon adapter yet and cannot be enabled"}}
+
+    @router.route("GET", "/api/agents")
+    def agents_status(app, req):
+        probe = req.str_query("probe", "0") in ("1", "true")
+        return {"enabled": app.config.get("agents.enabled"), "agents": agent_report(app, probe=probe),
+                "workflows": {w: list(app.config.route(w)) for w in config_loader.WORKFLOWS}, "metrics": app.runtime.metrics()}
+
+    @router.route("GET", "/api/config")
+    def config_view(app, req):
+        return config_report(app)
+
+    @router.route("POST", "/api/config/reload")
+    def config_reload(app, req):
+        try:
+            fresh = config_loader.reload_config()
+        except errors.ConfigurationError:
+            raise  # the previous configuration stays active; the message names the offending key
+        app.apply_config(fresh)
+        return config_report(app)
 
     @router.route("POST", "/api/files/import")
     def upload(app, req):
         if not req.length or not 0 < req.length <= module.MAX_SOURCE_BYTES:
-            raise LimitExceeded("File is empty or exceeds the 64 MiB limit")
+            raise LimitExceeded(f"File is empty or exceeds the {helpers_module.format_bytes(module.MAX_SOURCE_BYTES)} limit")
+        with app.lock:
+            if len(app.files) >= int(app.config.get("files.max_active_uploads")):
+                raise LimitExceeded("Too many imported models are active; remove unused models first")
         name = req.str_query("name", max_len=180)
         suffix = Path(name).suffix.lower()
         if suffix not in module.THREE_D | module.TWO_D | module.OPTIONAL_FORMATS:
@@ -193,7 +279,8 @@ def build_router():
     def inspect(app, req):
         data = req.json()
         path = app.get_file(str(data.get("id", "")))
-        result = run(module.inspect, path, unit=data.get("unit", "mm"), dwg_executable=app.dwg_executable)
+        unit = unit_of(app, data)
+        result = run(app.cached, "inspect", path, unit, lambda: module.inspect(path, unit=unit, dwg_executable=app.dwg_executable))
         result["source"]["name"] = app.original_names.get(str(data.get("id")), path.name)
         return result
 
@@ -209,8 +296,8 @@ def build_router():
             raise BadRequest("No verified converter for this format")
         identity = uuid.uuid4().hex
         path = app.output_dir / (identity + ext)
-        result = run(module.convert, source, path, policy=data.get("policy", "best_effort"),
-                     unit=data.get("unit", "mm"), dwg_executable=app.dwg_executable)
+        result = run(module.convert, source, path, policy=data.get("policy", app.config.get("conversion.default_policy")),
+                     unit=unit_of(app, data), dwg_executable=app.dwg_executable)
         source_name = app.original_names.get(str(data.get("id")), source.name)
         result["source"] = source_name
         result["target"] = Path(source_name).stem + ext
@@ -221,36 +308,35 @@ def build_router():
 
     @router.route("GET", "/api/repair/capabilities")
     def repair_capabilities(app, req):
-        return repairs.capability_info()
+        return repairs.capability_info(app.settings)
 
     @router.route("POST", "/api/repair/analyze")
     def repair_analyze(app, req):
         data = req.json()
         source_id = str(data.get("id", ""))
         path = app.get_file(source_id)
-        mesh = run(module.load_mesh, path, unit=data.get("unit", "mm"))
-        diagnosis = repair_diagnosis(mesh, data.get("tolerance", "auto"))
+        mesh = run(module.load_mesh, path, unit=unit_of(app, data))
+        diagnosis = repair_diagnosis(app, mesh, data.get("tolerance", "auto"))
         with app.lock:
             app.repair_diagnoses[source_id] = diagnosis
-        return {"diagnosis": diagnosis, "capabilities": repairs.capability_info()}
+        return {"diagnosis": diagnosis, "capabilities": repairs.capability_info(app.settings)}
 
     @router.route("POST", "/api/repair/suggest")
     def repair_suggest(app, req):
         data = req.json()
         source_id = str(data.get("id", ""))
         path = app.get_file(source_id)
-        limit = data.get("max_candidates", 5)
+        limit = data.get("max_candidates")
         agent_enabled = data.get("use_agents", True)
-        if type(limit) is not int:
-            raise BadRequest("Candidate count must be an integer")
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise BadRequest("Candidate count must be a positive integer")
         if not isinstance(agent_enabled, bool):
             raise BadRequest("use_agents must be a Boolean")
-        mesh = run(module.load_mesh, path, unit=data.get("unit", "mm"))
-        diagnosis = repair_diagnosis(mesh, data.get("tolerance", "auto"))
+        mesh = run(module.load_mesh, path, unit=unit_of(app, data))
+        diagnosis = repair_diagnosis(app, mesh, data.get("tolerance", "auto"))
         tol = diagnosis["tolerance"]
-        if len(mesh.faces) > 200_000:
-            limit = min(limit, 2)  # Bound the in-memory candidate working set.
-        generated = run(repairs.candidates, mesh, tol, limit)
+        limit = app.settings.candidate_limit(len(mesh.faces), limit)  # configured cap, tighter for very large meshes
+        generated = run(repairs.candidates, mesh, tol, limit, app.settings)
         original_name = app.original_names.get(source_id, path.name)
         source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         outputs = []
@@ -266,7 +352,12 @@ def build_router():
                 app.repair_candidates[identity] = (source_id, candidate, original_name, source_hash)
                 outputs.append({"id": identity, **candidate.details()})
             repair_result = {"diagnosis": diagnosis, "candidates": outputs}
-        repair_result["agents"] = agent_bridge.mesh_repair_advice(diagnosis, outputs, enabled=agent_enabled)
+        if agent_enabled:
+            # Postconditions first (fast, bounded), then the optional language explanation: a slow Reasoning Agent never delays them.
+            for entry in outputs:
+                entry["agent_checks"] = [r.to_dict() for r in adapters.candidate_postconditions(
+                    app.runtime, diagnosis.get("source", {}), entry.get("validation", {}), label=entry.get("strategy", "repair"))]
+        repair_result["agents"] = agent_bridge.mesh_repair_advice(diagnosis, outputs, enabled=agent_enabled, runtime=app.runtime)
         with app.lock:
             for report_id, report_source in app.report_sources.items():
                 if report_source == source_id and report_id in app.reports:
@@ -374,14 +465,31 @@ def build_router():
     def analyze(app, req):
         data = req.json()
         path = app.get_file(str(data.get("id", "")))
-        report = run(module.analysis, path, unit=data.get("unit", "mm"))
+        unit = unit_of(app, data)
+        report = run(app.cached, "analysis", path, unit, lambda: module.analysis(path, unit=unit))
         report["source"]["name"] = app.original_names.get(str(data.get("id")), path.name)
         identity = uuid.uuid4().hex
         with app.lock:
             app.reports[identity] = report
             app.report_sources[identity] = str(data.get("id"))
         return {"id": identity, "report": report,
-                "filenames": {fmt: module.report_filename(report, fmt) for fmt in ("json", "sldc")}}
+                "filenames": {fmt: module.report_filename(report, fmt, prefix=app.config.get("reporting.filename_prefix")) for fmt in ("json", "sldc")}}
+
+    @router.route("POST", "/api/reports/{id}/interpret")
+    def report_interpret(app, req):
+        identity = req.params["id"]
+        with app.lock:
+            report = app.reports.get(identity)
+        if report is None or report.get("report_kind") != "cadcon.analysis":
+            raise NotFound("Unknown geometry analysis report")
+        outcome = adapters.analysis_interpretation(app.runtime, report.get("findings", []), report.get("geometry_summary", {}))
+        record = outcome.to_dict()
+        if outcome.ok:
+            with app.lock:
+                app.reports[identity]["ai_analysis"] = {"agent": "src.agents.reasoning_agent.ReasoningAgent", "evidence": outcome.result["grounded_in"],
+                                                        "evidence_records": outcome.evidence, "summary": outcome.result["interpretation"],
+                                                        "limitations": "; ".join(outcome.limitations)}
+        return record
 
     @router.route("POST", "/api/reports/{id}/preview")
     def report_preview(app, req):
@@ -393,7 +501,7 @@ def build_router():
             raise NotFound("Unknown geometry analysis report")
         if source_id != expected_source_id:
             raise BadRequest("The screenshot is not associated with this report's source model")
-        image, width, height = read_png_preview(req)
+        image, width, height = read_png_preview(req, app)
         with app.lock:
             if app.report_sources.get(identity) != source_id:
                 raise BadRequest("The report was replaced during preview generation")
@@ -416,7 +524,7 @@ def build_router():
             entry = app.repair_candidates.get(candidate_id)
         if not report_source or entry is None or entry[0] != report_source:
             raise BadRequest("The selected repair candidate does not belong to this analysis report")
-        image, width, height = read_png_preview(req)
+        image, width, height = read_png_preview(req, app)
         with app.lock:
             if app.report_sources.get(report_id) != entry[0]:
                 raise BadRequest("The report changed during repair preview generation")
@@ -426,16 +534,40 @@ def build_router():
                 "sha256": hashlib.sha256(image).hexdigest()}
         return {"attached": True, "width": width, "height": height}
 
+    def compare_registration(app, first, second, unit, result):
+        """Rigid registration of the right model's sampled surface onto the left's with the SLAI Spatial Agent (an estimate, labelled so)."""
+        if result.get("status") in ("identical", "incomparable") or result.get("left", {}).get("geometry_summary", {}).get("representation") != "triangle_mesh":
+            return {"status": "not_applicable", "reason": "Registration applies to two different triangle meshes", "evidence": [
+                helpers_module.evidence(helpers_module.UNAVAILABLE, "cadcon.compare", "Registration was not run", reason="not applicable")]}
+        left, right = run(module.load_mesh, first, unit=unit), run(module.load_mesh, second, unit=unit)
+        factor = (result.get("unit_normalised") or {}).get("factor", 1.0)
+        count = 300
+        source = [[x * factor for x in p] for p in module.sample_points(right, count)]
+        target = module.sample_points(left, count)
+        size = min(len(source), len(target))
+        outcome = adapters.register_point_sets(app.runtime, source[:size], target[:size])
+        record = outcome.to_dict()
+        record["samples"] = size
+        record["unit"] = result["left"]["geometry_summary"].get("unit")
+        record["direction"] = "right model onto left model"
+        return record
+
     @router.route("POST", "/api/compare")
     def compare(app, req):
         data = req.json()
         a = app.get_file(str(data.get("left", "")))
         b = app.get_file(str(data.get("right", "")))
         try:
-            tol = float(data.get("tolerance", 0.000001))
+            tol = float(data.get("tolerance", app.config.get("comparison.default_tolerance")))
         except (ValueError, TypeError) as exc:
             raise BadRequest("Tolerance must be a number") from exc
-        result = run(module.compare, a, b, tolerance=tol, unit=data.get("unit", "mm"))
+        register = data.get("register", False)
+        if not isinstance(register, bool):
+            raise BadRequest("register must be a Boolean")
+        unit = unit_of(app, data)
+        result = run(module.compare, a, b, tolerance=tol, unit=unit)
+        if register:
+            result["registration"] = compare_registration(app, a, b, unit, result)
         result["left"]["source"]["name"] = app.original_names.get(str(data.get("left")), a.name)
         result["right"]["source"]["name"] = app.original_names.get(str(data.get("right")), b.name)
         identity = uuid.uuid4().hex
@@ -447,7 +579,7 @@ def build_router():
     def spatial_nearest(app, req):
         data = req.json()
         source = app.get_file(str(data.get("id", "")))
-        return run(module.spatial_nearest, source, data.get("point_m", [0, 0, 0]), unit=data.get("unit", "mm"))
+        return run(module.spatial_nearest, source, data.get("point_m", [0, 0, 0]), unit=unit_of(app, data))
 
     @router.route("GET", "/api/files/{id}/geometry")
     def geometry(app, req):
@@ -485,10 +617,12 @@ def build_router():
         fmt = req.str_query("format", "json")
         if fmt == "sldc" and data.get("report_kind") == "cadcon.analysis" and preview is None:
             raise BadRequest("Generate the model preview before exporting the native SLDC report")
-        payload = run(module.report_bytes, data, fmt, preview_png=preview,
-                      repair_preview_png=repair_preview)
+        prefix = app.config.get("reporting.filename_prefix")
+        payload = run(module.report_bytes, data, fmt, preview_png=preview, repair_preview_png=repair_preview,
+                      include_ai_analysis=app.config.get("reporting.include_ai_analysis"),
+                      include_repair_evidence=app.config.get("reporting.include_repair_evidence"))
         content_type = "application/x-slai-sldc+zip" if fmt == "sldc" else "application/json"
-        return file_response(payload, module.report_filename(data, fmt), content_type)
+        return file_response(payload, module.report_filename(data, fmt, prefix=prefix), content_type)
 
     return router
 
@@ -497,10 +631,11 @@ def main(argv=None) -> int:
     from pathlib import Path
     parser = argparse.ArgumentParser(description="CADCon 2D/3D CAD inspection and conversion")
     parser.add_argument("--slai-root", help="Path to the SLAI v2.4 checkout")
+    parser.add_argument("--config", help="Path to a CADCon configuration YAML (default: configs/cadcon_config.yaml or $CADCON_CONFIG)")
     parser.add_argument("--data-dir", help="Local private CADCon data directory")
     parser.add_argument("--dwg-executable", help="Explicit absolute path to ODAFileConverter")
     parser.add_argument("--port", type=int, default=None,
-                        help="Listening port (default 8770, with automatic fallback when busy; 0 picks a free port)")
+                        help="Listening port (default from configuration, normally 8770, with automatic fallback when busy; 0 picks a free port)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
     root = _activate_slai(args.slai_root)
@@ -508,34 +643,52 @@ def main(argv=None) -> int:
         parser.error("SLAI shared tools were not found. Pass --slai-root or set SLAI_ROOT to your SLAI v2.4 checkout")
     from applications.tools.server import Identity, LocalServer, ServerOptions, serve
     from applications.tools.storage import default_data_dir
-    data_dir = Path(args.data_dir) if args.data_dir else default_data_dir("cadcon", "CADCon")
+    loader = _module("utils.config_loader")
+    cli = {}  # command-line flags are the highest-precedence overrides
+    if args.port is not None:
+        cli["server.port"] = args.port
+    if args.data_dir:
+        cli["paths.data_dir"] = args.data_dir
+    if args.dwg_executable:
+        cli["conversion.dwg_executable"] = args.dwg_executable
+    if args.no_browser:
+        cli["server.open_browser"] = False
+    try:
+        config = loader.activate(loader.load_config(args.config, overrides=cli), path=args.config, overrides=cli)
+    except _module("utils.cadcon_errors").ConfigurationError as exc:
+        parser.error(f"Configuration problem: {exc.message}")
+    data_dir = Path(config.get("paths.data_dir")) if config.get("paths.data_dir") else default_data_dir("cadcon", "CADCon")
     if not APP_DIR.joinpath("dist", "index.html").is_file():
         parser.error("CADCon frontend has not been built. Run 'npm run build' from the CADCon directory")
-    requested_port = 8770 if args.port is None else args.port
-    if not 0 <= requested_port <= 65535:
-        parser.error("Port must be between 0 and 65535")
-    app = CADCon(data_dir, args.dwg_executable, root)
+    requested_port = config.get("server.port")
+    app = CADCon(data_dir, None, root, config)
     token = secrets.token_urlsafe(32)
-    options = ServerOptions(token, APP_DIR / "dist", port=requested_port,
+    options = ServerOptions(token, APP_DIR / "dist", host=config.get("server.host"), port=requested_port,
                             tools_web_dir=root / "applications" / "tools" / "web",
                             asset_dirs=(APP_DIR / "assets", root / "applications" / "assets"),
-                            max_body_bytes=64 * 1024 * 1024)
+                            max_body_bytes=config.get("server.max_request_bytes"))
     router = build_router()
     identity = Identity("cadcon", "CADCon")
     try:
         server = LocalServer(app, identity, router, options)
     except OSError as exc:
-        # A stale CADCon instance or another app may already be listening on
-        # the default port. Let the OS pick a free one; the server's base_url
-        # below uses the *actual* assigned port. Explicit ports remain strict.
+        # A stale CADCon instance or another app may already be listening on the preferred port. Let the OS pick a free one; the server's
+        # base_url below uses the *actual* assigned port. An explicit --port stays strict, as does server.port_fallback: false.
         address_busy = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048
-        if args.port is not None or not address_busy:
+        if args.port is not None or not address_busy or not config.get("server.port_fallback"):
             raise
-        print("CADCon: default port 8770 is occupied; selecting an available port.", file=sys.stderr)
+        print(f"CADCon: port {requested_port} is occupied; selecting an available port.", file=sys.stderr)
         options.port = 0
         server = LocalServer(app, identity, router, options)
+    details = [("Data", str(data_dir)), ("SLAI", str(root))]
+    if config.get("application.startup_diagnostics"):
+        diag = config.diagnostics()
+        enabled = [k for k in loader.INTEGRATED_AGENTS if config.agent_enabled(k)]
+        details += [("Config", f"{diag['loaded_from']} ({diag['file'] or 'built-in defaults'}), mode {config.get('application.mode')}"),
+                    ("Repair", f"{config.get('repair.mode')} mode, up to {config.get('repair.max_candidates')} candidates"),
+                    ("Agents", ", ".join(enabled) + " (loaded on first use)" if enabled else "none enabled")]
     return serve(server, title="SLAI CADCon", version=VERSION, url=f"{server.base_url}/?token={token}",
-                 details=(("Data", str(data_dir)), ("SLAI", str(root))), open_browser=not args.no_browser)
+                 details=tuple(details), open_browser=config.get("server.open_browser"), on_close=app.close)
 
 
 if __name__ == "__main__":

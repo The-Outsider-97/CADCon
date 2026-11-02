@@ -1,0 +1,87 @@
+# CADCon configuration (schema version 1).
+#
+# Read through SLAI's shared ConfigRepository by utils/config_loader.py and validated before use. Every key below is optional - the value
+# shown is the built-in default - and every key is consumed by the running application. Unknown keys are errors, so a typo never silently
+# falls back to a default. Precedence: command line / explicit overrides > environment variables (named in the comments) > this file >
+# built-in defaults. Edit, then restart CADCon (or call POST /api/config/reload).
+#
+# Deliberately not here: logging and observability (SLAI's own logger and instrumentation are used unchanged), authentication, session
+# and Origin checks (owned by SLAI's shared local server), and the unit table (owned by SLAI's unit registry).
+
+application:
+  name: CADCon
+  schema_version: 1            # must equal the schema CADCon implements
+  mode: production             # development | production        env: CADCON_MODE
+                               #   development shows the configuration file path in System; production shows only its name
+  startup_diagnostics: true    # print a capability / agent summary to the console at start-up
+
+server:
+  host: 127.0.0.1              # must be loopback (127.0.0.1, localhost, ::1); there is no override
+  port: 8770                   # preferred port, 0 = let the OS choose      env: CADCON_PORT
+  port_fallback: true          # when the preferred port is busy, choose a free one (an explicit --port stays strict)
+  open_browser: true           # open the default browser after start     env: CADCON_OPEN_BROWSER
+  max_request_bytes: 67108864  # 64 MiB; must not be below files.max_source_bytes
+
+paths:
+  data_dir: null               # private uploads/outputs folder; null = SLAI's per-user default     env: CADCON_DATA_DIR
+
+files:
+  max_source_bytes: 67108864   # 64 MiB. Raising it raises parser memory use - see geometry.max_triangles
+  max_active_uploads: 200      # imported models kept at once
+
+geometry:
+  default_unit: mm             # declared unit for unitless formats (STL, OBJ) when a request names none   env: CADCON_DEFAULT_UNIT
+  max_triangles: 600000        # largest triangle mesh analysed in memory
+
+conversion:
+  default_policy: best_effort  # strict | lossless_where_supported | allow_approximation | best_effort
+  dwg_executable: null         # absolute path of the ODA File Converter to enable DWG   env: CADCON_DWG_EXECUTABLE
+
+repair:
+  mode: balanced               # conservative | balanced | exploratory      env: CADCON_REPAIR_MODE
+                               #   conservative: exact stitching and welds up to 0.1% of the model diagonal; any new defect rejects a level
+                               #   balanced:     welds up to 0.5% of the diagonal, ranks by measured outcome, accepts clearly reported partial improvements
+                               #   exploratory:  welds up to 1% of the diagonal; results are labelled exploratory and never presented as verified-safe
+  max_candidates: 5            # 1-5 candidates per request
+  large_mesh_triangles: 200000 # above this many triangles ...
+  large_mesh_max_candidates: 2 # ... only this many candidates are built (bounds memory)
+  max_patch_edges: 128         # largest boundary loop a planar patch may fill
+  max_diagnostic_loops: 256    # boundary loops measured in a diagnosis
+  max_tolerance_fraction: null # tighter cap on the weld tolerance (fraction of the model diagonal, <= 0.01); null = the repair mode's ceiling
+  enabled_strategies:          # strategies that may be offered; remove one to disable it everywhere
+    - topology
+    - tolerant_weld
+    - isolate_shells
+    - hole_fill
+    - planar_cap
+
+comparison:
+  default_tolerance: 0.000001  # used by Compare when a request names none
+
+visualization:
+  preview_triangle_limit: 50000   # triangles sent to the 3D viewer; analysis always uses the full mesh
+
+reporting:
+  include_ai_analysis: true       # add the AI Analysis chapter when a SLAI agent actually answered
+  include_repair_evidence: true   # add repair diagnosis / candidates / evidence classes to reports
+  max_preview_bytes: 8388608      # largest accepted report preview image (8 MiB)
+  filename_prefix: cadcon-analysis
+
+agents:
+  enabled: true                   # master switch; deterministic CADCon features never depend on agents   env: CADCON_AGENTS_ENABLED
+  default_timeout_seconds: 8.0    # budget of one agent call
+  load_timeout_seconds: 45.0      # wait for an agent that is still loading for the first time (loading is lazy and happens once)
+  max_workers: 2                  # agent calls that may run at once
+  failure_cooldown_seconds: 30.0  # after a timeout/failure an agent is not called again for this long
+  integrations:                   # only agents with a CADCon adapter: spatial, reasoning, verification
+    spatial:      {enabled: true}
+    reasoning:    {enabled: true}
+    verification: {enabled: true}
+  workflows:                      # which agents serve which workflow, in order
+    repair_advice: [reasoning]               # explanation of the measured diagnosis and candidates
+    analysis_interpretation: [reasoning]     # explanation of an analysis report's findings
+    candidate_postconditions: [verification] # declared repair postconditions checked by the Verification Agent
+    compare_registration: [spatial]          # rigid registration of two meshes in Compare
+
+performance:
+  analysis_cache_entries: 32      # inspection / analysis results cached by source hash + unit (0 disables)

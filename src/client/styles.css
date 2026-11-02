@@ -65,3 +65,6 @@ body { color: var(--text); background: var(--bg); font-family: var(--font-ui); f
 @media (max-width: 1150px) { .workspace-grid { grid-template-columns: 1fr; }.form-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 700px) { .app { grid-template-columns: 64px 1fr; }.sidebar { padding: 10px 6px; }.brand { padding: 7px 0; justify-content: center; }.brand-logo { width: 35px; height: 35px; }.brand > div, .navigation .btn.nav-item { font-size: 0 !important; }.sidebar .btn.nav-item { padding: 13px 5px; text-align: center; font-size: 0; }.sidebar .btn.nav-item::first-letter { font-size: 18px; }.sidebar .btn.theme-toggle { font-size: 0; text-align: center; }.workspace { padding: 20px 12px; }.stats-grid { grid-template-columns: repeat(2, 1fr); }.form-grid { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .drop-zone { transition: none; } }
+
+.agent-checks { margin: .25rem 0 .75rem; padding-left: 1.1rem; font-size: .85rem; }
+.agent-checks li.bad { color: var(--danger, #e5484d); }

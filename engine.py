@@ -14,12 +14,20 @@ import struct
 import time
 import unicodedata
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .utils import cadcon_helpers as helpers
+except ImportError:  # Direct run_cadcon.py launcher
+    from utils import cadcon_helpers as helpers
+
+# Process-wide limits. They default to the shipped cadcon_config.yaml values and are replaced, at start-up and whenever a CADCon instance
+# is created, by configure() from the validated configuration (files.max_source_bytes, geometry.max_triangles,
+# visualization.preview_triangle_limit). Nothing else in this module is configurable on purpose.
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_TRIANGLES = 600_000
 PREVIEW_TRIANGLE_LIMIT = 50_000
@@ -35,6 +43,23 @@ class GeometryError(ValueError):
     """A malformed geometry or an unsupported/unsafe exchange operation."""
 
 
+def configure(*, max_source_bytes: int | None = None, max_triangles: int | None = None,
+              preview_triangle_limit: int | None = None) -> dict[str, int]:
+    """Apply configured limits (``None`` keeps the current value) and return the limits now in force."""
+    global MAX_SOURCE_BYTES, MAX_TRIANGLES, PREVIEW_TRIANGLE_LIMIT
+    if max_source_bytes is not None:
+        MAX_SOURCE_BYTES = int(max_source_bytes)
+    if max_triangles is not None:
+        MAX_TRIANGLES = int(max_triangles)
+    if preview_triangle_limit is not None:
+        PREVIEW_TRIANGLE_LIMIT = int(preview_triangle_limit)
+    return limits()
+
+
+def limits() -> dict[str, int]:
+    return {"max_source_bytes": MAX_SOURCE_BYTES, "max_triangles": MAX_TRIANGLES, "preview_triangle_limit": PREVIEW_TRIANGLE_LIMIT}
+
+
 @dataclass
 class Mesh:
     vertices: list[list[float]]
@@ -48,14 +73,13 @@ def _regular_source(path: Path) -> Path:
     if path.is_symlink() or not path.is_file():
         raise GeometryError("The source must be an existing, regular file")
     if not 0 < path.stat().st_size <= MAX_SOURCE_BYTES:
-        raise GeometryError("Source file is empty or exceeds the 64 MiB input limit")
+        raise GeometryError(f"Source file is empty or exceeds the {MAX_SOURCE_BYTES // (1024 * 1024)} MiB input limit")
     return path
 
 
 def _length_unit(unit: str) -> str:
     """Validate user-declared units through SLAI's authoritative unit registry."""
-    from src.utils.spatial_formats.common.units import require_unit
-    return require_unit(unit)
+    return helpers.length_unit(unit)
 
 
 def _number(value: str) -> float:
@@ -216,6 +240,35 @@ def _length(v: list[float]) -> float:
     return math.sqrt(_dot(v, v))
 
 
+def indexed_edges(mesh: Mesh) -> dict[tuple[int, int], list[tuple[int, int, int]]]:
+    """Undirected edge -> ``[(face, start, end), ...]`` over the mesh's own vertex indices (no implicit welding)."""
+    edges: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(list)
+    for number, (a, b, c) in enumerate(mesh.faces):
+        for start, end in ((a, b), (b, c), (c, a)):
+            edges[(min(start, end), max(start, end))].append((number, start, end))
+    return edges
+
+
+def face_components(mesh: Mesh, edges: dict) -> tuple[list[int], int]:
+    """Union faces that share a manifold (two-face) edge. Returns the component number of each face and the component count."""
+    parent = list(range(len(mesh.faces)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for uses in edges.values():
+        if len(uses) == 2:
+            a, b = root(uses[0][0]), root(uses[1][0])
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+    ids = [root(i) for i in range(len(mesh.faces))]
+    lookup = {key: idx for idx, key in enumerate(sorted(set(ids)))}
+    return [lookup[i] for i in ids], len(lookup)
+
+
 def mesh_summary(mesh: Mesh) -> dict[str, Any]:
     _validated_mesh(mesh)
     uses = Counter(tuple(sorted((face[i], face[(i + 1) % 3]))) for face in mesh.faces for i in range(3))
@@ -235,8 +288,9 @@ def mesh_summary(mesh: Mesh) -> dict[str, Any]:
     nonmanifold = sum(1 for count in uses.values() if count > 2)
     watertight = bool(mesh.faces) and boundary == 0 and nonmanifold == 0 and degenerate == 0
     distinct = len({tuple(v) for v in mesh.vertices})
+    components = face_components(mesh, indexed_edges(mesh))[1] if len(mesh.faces) <= MAX_TRIANGLES else None
     return {
-        "representation": "triangle_mesh", "unit": mesh.unit,
+        "representation": "triangle_mesh", "unit": mesh.unit, "connected_components": components,
         "vertices": len(mesh.vertices), "distinct_coordinate_vertices": distinct,
         "coincident_coordinate_records": len(mesh.vertices) - distinct,
         "edges": len(uses), "polygons": mesh.source_polygons if mesh.source_polygons is not None else len(mesh.faces),
@@ -427,10 +481,15 @@ def convert(source: Path, destination: Path, *, policy: str = "best_effort", uni
                 raise GeometryError("Unsupported 2D output or missing DWG backend")
     try:
         target = inspect(destination, unit=unit, dwg_executable=dwg_executable)
+        fidelity = verify_fidelity(before, target)
+        if fidelity["violations"] and policy in {"strict", "lossless_where_supported"}:
+            raise GeometryError("Conversion fidelity check failed under the selected policy (round-trip changed " +
+                                ", ".join(fidelity["violations"]) + ")")
+        notes.extend(f"Fidelity check found a change in {name.replace('_', ' ')}" for name in fidelity["violations"])
     except Exception:
         destination.unlink(missing_ok=True)  # only the newly written, unverified target
         raise
-    return {"status": "completed", "source": source.name, "target": destination.name,
+    return {"status": "completed", "fidelity": fidelity, "fidelity_verified": not fidelity["violations"], "source": source.name, "target": destination.name,
             "source_format": src.lstrip("."), "target_format": dst.lstrip("."),
             "source_sha256": before["source"]["sha256"], "source_summary": before["geometry_summary"],
             "backend": backend_report["adapter"] if backend_report else "SLAI native document / CADCon OBJ",
@@ -438,6 +497,105 @@ def convert(source: Path, destination: Path, *, policy: str = "best_effort", uni
             "unit_assumption": unit, "policy": policy,
             "target_sha256": target["source"]["sha256"], "target_summary": target["geometry_summary"],
             "warnings": sorted(set(notes)), "validated": True}
+
+
+def _unit_scale(summary: dict[str, Any], to_unit: str | None) -> float | None:
+    """Factor that expresses lengths in ``summary``'s unit in ``to_unit`` (None when either is unknown)."""
+    own = summary.get("unit")
+    if not own or not to_unit:
+        return None
+    return helpers.convert_tolerance(1.0, own, to_unit)
+
+
+def verify_fidelity(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Compare what was measured on the source with what was measured after re-reading the written output.
+
+    Only properties that a faithful exchange must keep are *violations* (triangle count and unit-normalised extents / area of a mesh, with
+    a tolerance that covers 32-bit float formats). Drawing entity changes are informational: 2D exchanges legitimately drop or merge
+    entities, and the backend report already lists what it dropped.
+    """
+    a, b = before["geometry_summary"], after["geometry_summary"]
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, left: Any, right: Any, status: str, note: str = "") -> None:
+        checks.append({"name": name, "source": left, "target": right, "status": status, **({"note": note} if note else {})})
+
+    if a["representation"] != b["representation"]:
+        add("representation", a["representation"], b["representation"], "violation")
+    elif a["representation"] == "triangle_mesh":
+        add("triangle_count", a["triangles"], b["triangles"], "passed" if a["triangles"] == b["triangles"] else "violation")
+        scale = _unit_scale(a, b.get("unit"))
+        ea, eb = helpers.bounds_extents(a.get("bounds")), helpers.bounds_extents(b.get("bounds"))
+        if ea is None or eb is None:
+            add("bounds", None, None, "not_applicable", "Bounds unavailable")
+        else:
+            factor = scale if scale is not None else 1.0
+            diagonal = math.sqrt(sum((x * factor) ** 2 for x in ea))
+            slack = 1e-5 * diagonal + 1e-12
+            ok = all(abs(x * factor - y) <= slack for x, y in zip(ea, eb))
+            add("bounds_extents", [x * factor for x in ea], eb, "passed" if ok else "violation",
+                "" if scale is not None or not (a.get("unit") or b.get("unit")) else "Units differ or are unknown; raw numbers compared")
+        if a.get("surface_area") and b.get("surface_area") is not None:
+            factor = (scale if scale is not None else 1.0) ** 2
+            expected = a["surface_area"] * factor
+            ok = abs(expected - b["surface_area"]) <= 1e-4 * max(expected, 1e-30)
+            add("surface_area", expected, b["surface_area"], "passed" if ok else "violation")
+    else:
+        add("entity_count", a.get("entities"), b.get("entities"), "passed" if a.get("entities") == b.get("entities") else "informational",
+            "2D exchanges may drop or merge entities; see the backend report for what was dropped")
+    violations = [c["name"] for c in checks if c["status"] == "violation"]
+    kind = helpers.VERIFIED if checks and not violations else helpers.MEASURED
+    return {"checks": checks, "violations": violations, "passed": not violations,
+            "evidence": helpers.evidence(kind, "engine.verify_fidelity",
+                                         "Output was re-read and measured against the source" + ("" if not violations else "; differences found"),
+                                         checks=len(checks))}
+
+
+def sample_points(mesh: Mesh, count: int) -> list[list[float]]:
+    """Deterministic surface samples: all vertices and triangle centroids, thinned by a fixed stride to at most ``count`` points."""
+    points = [list(v) for v in mesh.vertices]
+    for a, b, c in mesh.faces:
+        va, vb, vc = mesh.vertices[a], mesh.vertices[b], mesh.vertices[c]
+        points.append([(va[i] + vb[i] + vc[i]) / 3.0 for i in range(3)])
+    if len(points) > count:
+        step = len(points) / count
+        points = [points[int(i * step)] for i in range(count)]
+    return points
+
+
+def surface_distance(first: Mesh, second: Mesh, *, samples: int = 4000) -> dict[str, Any]:
+    """Symmetric nearest-sample distance between two meshes, in the first mesh's unit. **Approximate**: it measures distances between
+    surface *samples* (vertices and triangle centroids), so it can overestimate the true surface distance by about the sample spacing,
+    which is reported. It is not a Hausdorff proof and not a registration."""
+    try:
+        import numpy as np
+    except ImportError:
+        return {"status": "unavailable", "reason": "NumPy is not installed"}
+    factor = _unit_scale({"unit": second.unit}, first.unit) if (first.unit and second.unit) else 1.0
+    a = np.asarray(sample_points(first, samples), dtype=float)
+    b = np.asarray(sample_points(second, samples), dtype=float) * (factor if factor is not None else 1.0)
+
+    def directed(x: Any, y: Any) -> Any:
+        best = np.empty(len(x))
+        for start in range(0, len(x), 400):
+            chunk = x[start:start + 400]
+            best[start:start + 400] = np.sqrt(((chunk[:, None, :] - y[None, :, :]) ** 2).sum(axis=2).min(axis=1))
+        return best
+
+    d_ab, d_ba = directed(a, b), directed(b, a)
+    both = np.concatenate([d_ab, d_ba])
+    area = mesh_summary(first)["surface_area"]
+    spacing = math.sqrt(area / max(len(a), 1)) if area > 0 else None
+    return {"status": "estimated", "approximate": True,
+            "evidence": helpers.evidence(helpers.ESTIMATED, "engine.surface_distance",
+                                         "Nearest-sample distance between point-sampled surfaces; not an exact surface distance"),
+            "method": "nearest surface-sample distance (vertices and triangle centroids)", "unit": first.unit,
+            "samples_left": len(a), "samples_right": len(b),
+            "max": float(both.max()), "mean": float(both.mean()), "rms": float(math.sqrt((both ** 2).mean())),
+            "left_to_right_max": float(d_ab.max()), "right_to_left_max": float(d_ba.max()),
+            "sample_spacing_estimate": spacing,
+            "limitations": "Distances between surface samples overestimate true surface distance by up to about the sample spacing; "
+                           "this is not a Hausdorff proof or a registration"}
 
 
 def compare(first: Path, second: Path, *, unit: str = "mm", tolerance: float = 1e-6) -> dict[str, Any]:
@@ -448,8 +606,21 @@ def compare(first: Path, second: Path, *, unit: str = "mm", tolerance: float = 1
     if ga["representation"] != gb["representation"]:
         return {"status": "incomparable", "reason": "Different geometric representations",
                 "left": a, "right": b, "differences": {}}
+    gb_raw = gb
+    normalised = None
+    scale = _unit_scale(gb, ga.get("unit")) if ga["representation"] == "triangle_mesh" else None
+    if scale is not None and not math.isclose(scale, 1.0):
+        # Compare in the left model's unit so that the same part saved in metres and millimetres is not reported as different.
+        gb = dict(gb)
+        if gb.get("bounds"):
+            gb["bounds"] = {side: [x * scale for x in gb["bounds"][side]] for side in ("min", "max")}
+        for key, power in (("surface_area", 2), ("volume", 3)):
+            if gb.get(key) is not None:
+                gb[key] = gb[key] * scale ** power
+        normalised = {"from": gb_raw.get("unit"), "to": ga.get("unit"), "factor": scale}
     changes = {}
-    for key in ("vertices", "edges", "polygons", "triangles", "entities", "layers", "blocks", "watertight"):
+    for key in ("vertices", "edges", "polygons", "triangles", "entities", "layers", "blocks", "watertight",
+                "boundary_edges", "nonmanifold_edges", "degenerate_faces", "connected_components"):
         if key in ga and key in gb and ga[key] != gb[key]:
             changes[key] = {"left": ga[key], "right": gb[key]}
     for key in ("surface_area", "volume"):
@@ -469,8 +640,20 @@ def compare(first: Path, second: Path, *, unit: str = "mm", tolerance: float = 1
         status = "geometrically_equivalent" if _same_triangles(left, right, tolerance) else "modified"
     else:
         status = "modified" if changes else "analysis_incomplete"
-    return {"status": status, "left": a, "right": b, "differences": changes,
-            "tolerance": tolerance, "note": "Triangle equivalence is topology-sensitive; surface-distance registration remains unavailable"}
+    result: dict[str, Any] = {"status": status, "left": a, "right": b, "differences": changes, "tolerance": tolerance,
+                              "tolerance_basis": "absolute and relative, in the left model's unit",
+                              "note": "Triangle equivalence is topology-sensitive; the surface distance below is point-sampled and approximate"}
+    if normalised:
+        result["unit_normalised"] = normalised
+    if ga["representation"] == "triangle_mesh":
+        extents_a, extents_b = helpers.bounds_extents(ga.get("bounds")), helpers.bounds_extents(gb.get("bounds"))
+        if extents_a and extents_b:
+            result["bounding_box_delta"] = {"unit": ga.get("unit"), "extents_left": extents_a, "extents_right": extents_b,
+                                            "difference": [y - x for x, y in zip(extents_a, extents_b)]}
+        if status not in {"identical"}:
+            left_mesh, right_mesh = (load_mesh(first, unit=unit), load_mesh(second, unit=unit))
+            result["surface_distance"] = surface_distance(left_mesh, right_mesh)
+    return result
 
 
 def _bounds_close(first, second, tolerance: float) -> bool:
@@ -560,19 +743,13 @@ def spatial_nearest(path: Path, point_m: list[float], *, unit: str = "mm") -> di
             "meaning": "Nearest spatial-entity centre; not distance to the exact solid surface"}
 
 
-def report_filename(data: dict[str, Any], fmt: str) -> str:
-    """Download names are derived from the original upload, never its UUID path."""
+def report_filename(data: dict[str, Any], fmt: str, *, prefix: str = "cadcon-analysis") -> str:
+    """Download names are derived from the original upload, never its UUID path (see ``helpers.report_name``)."""
     if fmt not in {"json", "sldc"}:
         raise GeometryError("Report format must be JSON or SLDC")
     if data.get("report_kind") == "cadcon.comparison":
         return f"cadcon-comparison.{fmt}"
-    name = str((data.get("source") or {}).get("name") or "model")
-    stem = Path(name.replace("\\", "/").rsplit("/", 1)[-1]).stem
-    # The shared SLAI server also applies an ASCII-safe Content-Disposition
-    # fallback. Keep the HTTP name and the browser's downloaded name identical.
-    normalized = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
-    safe = re.sub(r"[^A-Za-z0-9._ -]", "_", normalized).strip(" ._")[:96].rstrip(" ._")
-    return f"cadcon-analysis-{safe or 'model'}.{fmt}"
+    return helpers.report_name(str((data.get("source") or {}).get("name") or "model"), fmt, prefix=prefix)
 
 
 def _report_value(item: Any) -> str:
@@ -598,9 +775,15 @@ def _report_time(value: str) -> str:
 
 
 def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = None,
-                 repair_preview_png: bytes | None = None) -> bytes:
+                 repair_preview_png: bytes | None = None, include_ai_analysis: bool = True,
+                 include_repair_evidence: bool = True) -> bytes:
     if fmt == "json":
-        return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        shown = dict(data)
+        if not include_ai_analysis:
+            shown.pop("ai_analysis", None)
+        if not include_repair_evidence:
+            shown.pop("repair", None)
+        return json.dumps(shown, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     if fmt != "sldc":
         raise GeometryError("Report format must be JSON or SLDC")
     from src.utils import sldc
@@ -746,7 +929,7 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
                     ["Recommendation", _report_value(finding.get("recommendation"))]]
             table(rows)
 
-    repair = data.get("repair")
+    repair = data.get("repair") if include_repair_evidence else None
     if isinstance(repair, dict) and isinstance(repair.get("diagnosis"), dict):
         observed = repair["diagnosis"]
         chapters.append(sldc.make_block("paragraph", "Mesh repair and reconstructed topology",
@@ -777,12 +960,18 @@ def report_bytes(data: dict[str, Any], fmt: str, *, preview_png: bytes | None = 
         provenance["preview"] = data["preview"]
     if repair:
         provenance["mesh_repair_agents"] = (repair.get("agents") or {}).get("status", "not recorded")
+    participation = data.get("agent_participation")
+    if isinstance(participation, list) and participation:
+        provenance["agents_consulted"] = "; ".join(
+            f"{row.get('agent')}: {row.get('operation')} → {row.get('status')}" for row in participation if isinstance(row, dict))
+    if data.get("evidence_summary"):
+        provenance["evidence_classes"] = data["evidence_summary"]
     if preview_png:
         provenance["cover_image_sha256"] = hashlib.sha256(preview_png).hexdigest()
     table([[key.replace("_", " ").capitalize(), _report_value(value)]
            for key, value in provenance.items()])
 
-    ai = data.get("ai_analysis")
+    ai = data.get("ai_analysis") if include_ai_analysis else None
     if isinstance(ai, dict) and ai.get("agent") and ai.get("evidence") and ai.get("summary"):
         chapter("AI Analysis")
         table([["Agent", _report_value(ai["agent"])],
