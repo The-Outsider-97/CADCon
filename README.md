@@ -1,2 +1,0 @@
-# CADCon
-CAD Converter
