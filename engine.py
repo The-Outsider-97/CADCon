@@ -382,7 +382,13 @@ def convert(source: Path, destination: Path, *, policy: str = "best_effort", uni
         kind, document = _scene(source, unit=unit, policy=policy, dwg_executable=dwg_executable)
         if kind == "3d":
             if dst == ".sgeo":
-                document.save(destination)
+                # Keep SGEO's authoritative package serializer, but publish
+                # through SLAI's application storage layer. On Windows some
+                # AppData filesystems reject the spatial writer's hard-link /
+                # no-clobber rename even for a new UUID output filename.
+                # Shared atomic_write(exclusive=True) reserves the destination
+                # and handles that Windows failure without replacing user data.
+                _safe_write(destination, document.dumps())
             elif dst == ".stl":
                 if document.unit != unit:
                     if src == ".sgeo":
@@ -401,7 +407,7 @@ def convert(source: Path, destination: Path, *, policy: str = "best_effort", uni
                 raise GeometryError("Unsupported 3D output")
         else:
             if dst == ".sdrw":
-                document.save(destination)
+                _safe_write(destination, document.dumps())
             elif dst == ".svg":
                 report = document.export_svg(destination, policy=policy)
                 notes.extend(report.dropped + report.approximations + report.warnings)
