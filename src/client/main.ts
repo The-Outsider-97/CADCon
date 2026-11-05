@@ -691,4 +691,9 @@ void Promise.all([api.get<typeof systemData>('/system'), api.get<typeof capabili
   files.splice(0, files.length, ...available);
   if (!selected) selected = files[0]?.id || '';
   show(page);
-}).catch(e => notice(e instanceof Error ? e.message : String(e), true));
+  window.dispatchEvent(new Event('slai:ready'));
+}).catch(e => {
+  const message = e instanceof Error ? e.message : String(e);
+  notice(message, true);
+  window.dispatchEvent(new CustomEvent('slai:startup-error', { detail: message }));
+});
