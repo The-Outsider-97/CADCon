@@ -25,8 +25,12 @@ From `SLAI/`, with CADCon cloned into `applications/CADCon/`:
 py -m applications.CADCon
 ```
 
-If port 8770 is occupied, pass `--port 0` for an ephemeral loopback port. Use
-`--no-browser` to print the authenticated URL without opening a browser.
+CADCon first tries port `8770`. If that default port is already in use, it now
+prints a diagnostic and automatically requests an available loopback port from
+Windows. Pass `--port 0` to request an available port immediately, or
+`--port 8771` to require a specific free port (an explicitly requested busy
+port is an error). Use `--no-browser` to print the authenticated URL without
+opening a browser.
 No app-specific server or shared theme files need to be copied from SLAI.
 
 The app **requires a local SLAI v2.4 checkout** to supply shared application
@@ -37,7 +41,7 @@ truth for CADCon-specific features.
 
 - Secure local UI with Counter, Converter, Analysis & Report, Compare, and System.
 - Dark/light mode, local drag-and-drop import, basic 2D SVG and interactive 3D
-  software-rendered previews (3,500-triangle display cap; full-file analysis).
+  software-rendered previews (50,000-triangle display cap; full-file analysis).
 - OBJ triangle/planar-quad inspection and ASCII/binary STL inspection.
 - SGEO, SDRW, GLB and supported SVG/DXF interchange through SLAI spatial APIs.
 - The Converter target selector follows the runtime's directed capability
@@ -52,6 +56,49 @@ truth for CADCon-specific features.
 - Findings with stable topology codes, counts, evidence, and explicitly listed
   checks that were not performed. Opt-in nearest-entity queries call SLAI's
   Spatial subsystem, not a replacement geometry model.
+- Analysis downloads use the original model stem, e.g.
+  `cadcon-analysis-hinge.sldc` / `cadcon-analysis-hinge.json`. The native SLDC
+  report uses a cover with an embedded PNG rendered from CADCon's actual model
+  preview, a managed table of contents, semantic chapters, structured tables,
+  and page-break/keep-with-next metadata. SLAI's SLDC 1.1 serializer is the
+  sole owner of the package and image assets; browser capture must complete
+  before the SLDC export button is enabled.
+- **Comparison SLDC** uses the same native report layout rather than a separate
+  simplified Markdown conversion. Both report types embed the existing CADCon
+  logo on the cover, use A4 content boundaries at 15–195 mm, and include the
+  document title, CADCon version and generation date in the contents/body
+  headers. Comparison reports provide a cover, ToC, overview, source-model
+  information, geometry summary, validation coverage, differences and
+  provenance. After the Differences table, the two actual model PNGs are
+  embedded side by side as native inline SLDC images (85 mm each). Both
+  screenshots must be captured from their associated uploaded files before
+  comparison SLDC export is enabled; JSON remains independently available.
+- **Mesh Repair & Reconstruction** is available under Analysis & Report for
+  triangle meshes. The welding tolerance defaults to **Automatic**: CADCon
+  tries exact reconstruction first, then tests a bounded set of model-scaled
+  tolerances only if boundary edges remain. It recommends the smallest tested
+  value that achieves the best observed boundary improvement without new non-manifold
+  edges or degenerate faces; a manual value or explicit zero remains available.
+  If no safe tolerance helps, CADCon explains that real openings may need
+  surface repair. It compares source-index and reconstructed topology,
+  diagnoses boundary loops and non-manifold edges,
+  and builds actual geometry for supported conservative strategies: vertex
+  welding, separation of touching manifold shells, triangulated planar holes,
+  and convex planar caps. Added faces are red in the interactive 3D preview;
+  topology-only changes correctly have no red faces. Repaired candidates are
+  independently checked and can be exported through native SLAI SGEO or OBJ.
+  The selected candidate can also be captured as a separate native SLDC PNG
+  asset inside the report's Findings section, with generated faces colored red.
+  The source is never overwritten. Curvature-aware and volumetric remeshing
+  remain disabled until verified backends are configured. These checks establish
+  topological closure, **not** certified solid validity: self-intersections,
+  coincident shell overlaps, intentional functional openings, and signed solid
+  volume require further validation. CADCon optionally requests explanations
+  from SLAI's public `AgentFactory` and `ReasoningAgent.perform_task` contract,
+  with an eight-second budget and explicit fallback. An agent may be unavailable
+  when its runtime dependencies or trained/configured capabilities are missing;
+  only successfully returned responses are labeled AI-assisted. Deterministic
+  repair and validation remain authoritative.
 
 ## Verified and conditional format matrix
 
@@ -104,11 +151,18 @@ because it would lose precision, metadata or semantics.
   using native SGEO/SDRW agent DTOs. The top-level multi-agent orchestrator and
   remaining Language/Reasoning/Quality agents are not yet connected; System
   explicitly reports this incomplete state.
+- The AI Analysis report chapter is omitted unless a verified, evidence-linked
+  agent result is present. No AI prose is simulated. The cover PNG may use a
+  50,000-triangle subset for large sources, while all numeric analysis uses the
+  complete model. The PDF/SLDC editor layout depends on the installed SLAI
+  document renderer honoring native page breaks and keep-with-next styles.
 - Batch conversion, job persistence, advanced geometry measurement and complete
   animation/assembly semantics remain development work.
 - The side-by-side compare previews are individually navigable; synchronized
   camera controls, transparency overlays and difference heatmaps are not yet
-  implemented. The renderer is a deliberately bounded software 3D preview.
+  implemented. The renderer is a deliberately bounded software 3D preview;
+  interaction uses an evenly distributed lower-detail rendering pass, then
+  redraws the full preview after motion settles.
 
 No unsupported format pair is advertised as a verified conversion. Source
 files are never overwritten by conversion. All operations use the shared
