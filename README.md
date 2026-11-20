@@ -37,9 +37,19 @@ The app **requires a local SLAI v2.4 checkout** to supply shared application
 tools and native spatial documents. Its own repository remains the source of
 truth for CADCon-specific features.
 
+## Desktop app (Windows installer)
+
+CADCon can be packaged as a self-contained Windows app (Tauri shell, bundled Python runtime, SLAI with its agents). See [doc/DESKTOP.md](doc/DESKTOP.md) for the contents, the build (`build-windows.cmd`) and what has and has not been verified; the installer has not been built yet.
+
 ## Working features
 
 - Secure local UI with Counter, Converter, Analysis & Report, Compare, and System.
+- The shared SLAI start-up screen, as in SPADRA and SLAI Writer (`branded` variant of `applications/tools/web/startup`): CADCon logo, name and
+  tagline, and a progress bar that advances only when the real start-up requests (system, capabilities, imported models) have finished. It is
+  dismissed when the workspace is ready; if start-up stalls or fails it offers **Reload** / **Show application**.
+- Imported and converted copies live in a per-instance session folder (`<data dir>/sessions/<pid>-<token>`). It is removed at shutdown, and
+  the next start removes any session whose owning process is no longer running (a crash). A session that may still be running is never touched.
+  Files left by earlier builds in `uploads/` and `outputs/` are purged once they are older than 24 hours.
 - Dark/light mode, local drag-and-drop import, basic 2D SVG and interactive 3D
   software-rendered previews (50,000-triangle display cap; full-file analysis).
 - OBJ triangle/planar-quad inspection and ASCII/binary STL inspection.
@@ -93,12 +103,54 @@ truth for CADCon-specific features.
   remain disabled until verified backends are configured. These checks establish
   topological closure, **not** certified solid validity: self-intersections,
   coincident shell overlaps, intentional functional openings, and signed solid
-  volume require further validation. CADCon optionally requests explanations
-  from SLAI's public `AgentFactory` and `ReasoningAgent.perform_task` contract,
-  with an eight-second budget and explicit fallback. An agent may be unavailable
-  when its runtime dependencies or trained/configured capabilities are missing;
-  only successfully returned responses are labeled AI-assisted. Deterministic
-  repair and validation remain authoritative.
+  volume require further validation. Deterministic repair and validation
+  remain authoritative; optional SLAI agent assistance is described under
+  **Configuration and SLAI agents** below.
+
+  The automatic tolerance is adaptive and scale-invariant. It is derived from
+  the measured boundary-vertex gaps and bounded by a ceiling that depends on
+  `repair.mode`: `conservative` (0.1 % of the model diagonal), `balanced`
+  (0.5 %) or `exploratory` (1 %, never labelled verified-safe). A level is
+  rejected if it collapses triangles or introduces non-manifold edges.
+  Candidates are ranked deterministically and lexicographically on measured
+  values (closed topology, no exploratory risk, then fewer non-manifold edges,
+  boundary edges, degenerate faces and winding conflicts, then smaller vertex
+  displacement and fewer added/removed faces; ranking and a Pareto flag are
+  attached to each candidate) and every candidate states what was measured. No candidate is ever described as a
+  valid solid.
+
+## Configuration and SLAI agents
+
+All behaviour is driven by `configs/cadcon_config.yaml` (override the file with
+`--config` or `CADCON_CONFIG`). Precedence is **command line / programmatic
+overrides > `CADCON_*` environment variables > YAML > built-in defaults**. Every
+key is validated (type, range, unknown keys, duplicate keys, loopback-only host)
+and every key has a runtime consumer; `tests/test_foundation.py` fails if a key
+is declared but nothing reads it. **System → Configuration** shows where values
+came from and *Reload configuration* re-reads the file (an invalid file is
+rejected and the running configuration stays active).
+
+CADCon integrates three SLAI agents through SLAI's own `AgentFactory`; it never
+constructs an agent itself, and no stand-in agent exists:
+
+| Agent | Used for | Evidence class | Notes |
+| --- | --- | --- | --- |
+| Verification | Model-checks the declared postconditions of each repair candidate (open boundary, non-manifold and winding counts do not increase) over a before/after abstraction of *measured* counts | `verified` | Verifies the stated invariants, not the geometry or solid validity |
+| Spatial | Optional rigid registration of two compared meshes (`align_point_clouds` on sampled surface points) | `estimated` | An estimate from samples, not a CAD feature match |
+| Reasoning | Plain-language explanation of a repair diagnosis and, on request, of analysis findings | `ai_assisted` | Advisory; needs the Reasoning Agent's runtime (e.g. PyTorch). Unavailable agents are reported as such |
+
+Agents are loaded lazily on first use, bounded by `agents.default_timeout_seconds`,
+`agents.load_timeout_seconds` and `agents.max_workers`, left alone for
+`agents.failure_cooldown_seconds` after a failure, and released through the
+factory on shutdown. A missing, slow or failing agent never changes a
+deterministic result, never produces invented output and never raises into the
+request: its status (`disabled`, `unavailable`, `timeout`, `failed`,
+`invalid_response`) is reported instead. Evidence classes are `measured`
+(deterministic code), `verified` (a check that ran), `ai_assisted` (an agent
+answered), `estimated` (an approximation, named as such) and `unavailable`.
+Other SLAI agents (Quality, Language, Optimization, …) have no CADCon adapter and
+cannot be enabled; the Quality Agent persists its own store inside the SLAI tree,
+so it is intentionally not connected.
 
 ## Verified and conditional format matrix
 
@@ -108,9 +160,9 @@ under **System**. It may change with installed dependencies. Current paths:
 | Format | Import | Export | Implementation and limits |
 | --- | --- | --- | --- |
 | STL | Yes | Yes with SLAI | Binary/ASCII source read, binary output, unitless triangle mesh |
-| OBJ | Yes | Yes | CADCon subset: triangles and convex planar quads; geometry only |
+| OBJ | Yes | Yes | CADCon subset: triangles and convex planar quads (non-planar, concave and 5+ vertex faces are refused); geometry only |
 | SGEO | Yes with SLAI | Yes with SLAI | SLAI authoritative native 3D document API |
-| GLB | Yes with SLAI | Yes with SLAI | SLAI supported glTF 2.0 subset; 3D mesh representations |
+| GLB | Yes with SLAI | Yes with SLAI | SLAI supported glTF 2.0 subset; 3D mesh representations. Size-limited by SLAI's kernel (see Limitations) |
 | SDRW | Yes with SLAI | Yes with SLAI | SLAI authoritative native 2D drawing API |
 | SVG | Yes with SLAI | Yes with SLAI | Restricted safe vector subset |
 | DXF | With `ezdxf` | With `ezdxf` | Supported vector entities through SLAI SDRW |
@@ -133,7 +185,10 @@ because it would lose precision, metadata or semantics.
 - OBJ import supports triangles and convex planar quads only. Material, texture,
   grouping and authored normals are not preserved by CADCon's OBJ adapter.
 - GLB is limited to the SLAI-supported glTF 2.0 subset; exact B-reps and NURBS
-  are tessellated. SVG import is SLAI's deliberately restricted safe subset.
+  are tessellated. SLAI's shared spatial kernel caps a GLB at 300,000 decoded
+  elements (4 x vertices + 6 x triangles; measured: an indexed OBJ of 20,480 triangles converts, 81,920 is refused, and an unindexed STL of 20,480
+  triangles is refused). CADCon reports the refusal with advice and leaves no output; it does not modify the kernel. SGEO conversion is slow for large
+  models (about 19 s at 82,000 triangles on the benchmark machine) and is refused at about 330,000. SVG import is SLAI's deliberately restricted safe subset.
 - DXF requires `ezdxf`. DWG requires a configured, licensed ODA executable
   (`--dwg-executable`). IFC requires compatible IfcOpenShell. Full STEP, SAT,
   FBX, glTF JSON and other listed candidate formats are **not implemented**.
@@ -141,16 +196,17 @@ because it would lose precision, metadata or semantics.
   source records count three vertices/edges per triangle even if positions
   coincide, matching the reporting convention of the reference BIMAP extraction.
   Solid-volume certification is withheld for unclosed or nonmanifold topology.
-- Comparison does not yet implement rigid registration, spatial difference
-  heatmaps or surface-distance equivalence proof. Same counts/bounds alone are
-  never treated as proof of equivalence.
+- Comparison reports an approximate, point-sampled surface distance and an
+  optional Spatial-Agent registration estimate; it does not provide spatial
+  difference heatmaps or an exact (Hausdorff) equivalence proof. Same
+  counts/bounds alone are never treated as proof of equivalence.
 - For native or precision sources, the visible triangle counts are from SLAI
   tessellation and **must not be interpreted as exact B-rep face/edge counts**.
   Only the checks enumerated as executed in a report are certified as run.
 - The SLAI Spatial subsystem is wired to an optional nearest-entity query
-  using native SGEO/SDRW agent DTOs. The top-level multi-agent orchestrator and
-  remaining Language/Reasoning/Quality agents are not yet connected; System
-  explicitly reports this incomplete state.
+  using native SGEO/SDRW agent DTOs. There is no top-level multi-agent
+  orchestrator; the Verification, Spatial and Reasoning adapters above are the
+  complete integration, and **System → SLAI agents** reports their live state.
 - The AI Analysis report chapter is omitted unless a verified, evidence-linked
   agent result is present. No AI prose is simulated. The cover PNG may use a
   50,000-triangle subset for large sources, while all numeric analysis uses the
@@ -174,7 +230,13 @@ loopback-only, authenticated SLAI HTTP server.
 py -m pip install pytest
 py -m pytest -q tests
 npm run build
+# end to end through the SLAI launcher (CADCon must be at SLAI\applications\CADCon, client built):
+py -m pytest -q tests_e2e
 ```
+
+Conversions are verified after writing: the output is re-read and its triangle
+count, extents and area (3D) or entity count (2D, informational) are compared with
+the source, and the result is returned as `fidelity` with its evidence class.
 
 For the standalone checkout, ensure `SLAI_ROOT` points to the v2.4 tree or set
 `PYTHONPATH` to that root when running native format tests.
@@ -182,7 +244,16 @@ For the standalone checkout, ensure `SLAI_ROOT` points to the v2.4 tree or set
 ## Package structure
 
 `engine.py` provides bounded geometry inspection, export routing and analysis;
-`app.py` is the thin shared-server composition root; `src/client/` holds the
-TypeScript/CSS UI. `tools/build.mjs` delegates to SLAI's shared build tool.
+`repair.py` the adaptive, policy-driven repair; `utils/` the shared error
+classification, helpers and configuration loader; `slai/bridge/` the agent
+runtime and adapters; `app.py` is the thin shared-server composition root;
+`src/client/` holds the TypeScript/CSS UI. `tools/build.mjs` delegates to SLAI's shared build tool.
 
-See `doc/USER_GUIDE.md` for the operation flow.
+See `doc/USER_GUIDE.md` for the operation flow and `doc/AUDIT_2026-11-19.md` for the audit that produced the current state: defect register,
+measured conversion results, benchmarks, and the list of what is **not** yet verified.
+
+## Release status
+
+CADCon is **not yet production-ready**. Windows desktop packaging (the shared `desktop.json` / Tauri / frozen-launcher path used by other SLAI
+applications) is not implemented for CADCon, and the DXF, DWG, IFC, real-agent and browser-on-Windows paths have not been verified on a Windows
+machine with the optional back ends installed. See the audit for the complete list.

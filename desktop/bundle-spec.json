@@ -1,0 +1,99 @@
+{
+  "format": 1,
+  "_comment": "What the installer ships. Read by tools/desktop/build_bundle.py. Paths are relative to the SLAI folder (slai) or to this CADCon folder (app); '**/' matches any depth.",
+  "slai": {
+    "include": [
+      "src",
+      "checkpointing",
+      "logs",
+      "applications/__init__.py",
+      "applications/tools",
+      "applications/assets"
+    ],
+    "exclude": [
+      "**/__pycache__",
+      "**/*.pyc",
+      "**/*.pyo",
+      "**/node_modules",
+      "**/.git",
+      "**/.github",
+      "src/utils/test",
+      "applications/tools/tests",
+      "applications/tools/tests_ts",
+      "**/*.bak.pkl",
+      "src/agents/**/artifacts/training",
+      "logs/*.log",
+      "logs/*.json",
+      "logs/runtime",
+      "logs/audit",
+      "logs/training",
+      "logs/enriched_wordlist_final",
+      "applications/tools/package.json",
+      "applications/tools/package-lock.json",
+      "applications/tools/tsconfig*.json",
+      "applications/tools/typings",
+      "applications/tools/web/src"
+    ],
+    "entry_modules": [
+      "src.agents.agent_factory",
+      "src.agents.spatial_agent",
+      "src.agents.reasoning_agent",
+      "src.agents.verification_agent",
+      "applications.tools.server",
+      "applications.tools.storage",
+      "applications.tools.desktop",
+      "applications.CADCon.app",
+      "applications.CADCon.engine",
+      "applications.CADCon.repair"
+    ],
+    "required": [
+      "src/utils/sldc.py",
+      "src/agents/agent_factory.py",
+      "src/agents/spatial_agent.py",
+      "src/agents/reasoning_agent.py",
+      "src/agents/verification_agent.py",
+      "checkpointing/checkpoint_manager.py",
+      "logs/logger.py",
+      "applications/tools/server/http.py",
+      "applications/tools/desktop.py",
+      "applications/tools/web/startup/loader.js"
+    ]
+  },
+  "app": {
+    "include": [
+      "__init__.py",
+      "__main__.py",
+      "app.py",
+      "engine.py",
+      "repair.py",
+      "run_cadcon.py",
+      "utils",
+      "slai",
+      "configs",
+      "assets",
+      "dist",
+      "LICENSE",
+      "README.md",
+      "doc"
+    ],
+    "exclude": ["**/__pycache__", "**/*.pyc"],
+    "required": ["app.py", "engine.py", "configs/cadcon_config.yaml", "dist/index.html", "dist/startup/loader.js"]
+  },
+  "runtime": {
+    "python_series": "3.13",
+    "embed_url": "https://www.python.org/ftp/python/{version}/python-{version}-embed-amd64.zip",
+    "torch_index": "https://download.pytorch.org/whl/cpu",
+    "profiles": {
+      "standard": ["desktop/requirements-standard.txt"],
+      "full": ["desktop/requirements-standard.txt", "desktop/requirements-full-extra.txt"]
+    },
+    "optional": "desktop/requirements-geometry-optional.txt",
+    "prune": [
+      "torch/include",
+      "torch/share",
+      "torch/test",
+      "**/__pycache__",
+      "**/*.pyi"
+    ]
+  }
+}

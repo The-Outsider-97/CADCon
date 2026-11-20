@@ -1,0 +1,26 @@
+# What the installed SLAI CADCon needs to run CADCon and the SLAI agents it uses (Spatial, Reasoning, Verification), as Windows wheels for Python 3.13.
+# Versions are the ones in the SLAI checkout's own venv (G:\GAIA\AI\SLAI\venv), where the agents are known to run, read on 2026-11-20.
+# What loading each agent demands (traced, not assumed): Spatial and Verification import only numpy, psutil, PyYAML, jsonschema (+referencing) and colorama.
+# Reasoning also imports torch (reasoning/modules/adaptive_circuit.py), pgmpy and Pympler. The factory's note that Reasoning is "torch-free" does not hold.
+numpy==2.5.4
+scipy==1.18.1
+pandas==3.1.1
+scikit-learn==1.9.1
+statsmodels==0.15.0
+networkx==3.7
+joblib==1.6.0
+PyYAML==6.0.3
+psutil==7.2.2
+regex==2026.11.9
+jsonschema==4.26.0
+referencing==0.37.0
+colorama==0.4.6
+Pillow==13.0.0
+Pympler==1.1
+pgmpy==1.1.2
+# CPU build: the SLAI venv has torch 2.15.0+cpu. Installed from PyTorch's CPU index (see runtime.torch_index in bundle-spec.json).
+torch==2.15.0
+# Geometry back ends the SLAI spatial formats use (venv versions)
+trimesh==5.2.1
+shapely==2.2.0
+manifold3d==3.5.5

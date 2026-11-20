@@ -1,0 +1,12 @@
+{
+  "slug": "cadcon",
+  "title": "CADCon",
+  "module": "applications.CADCon",
+  "needs": "numpy",
+  "requirements": "applications/CADCon/desktop/requirements-standard.txt",
+  "build_script": "applications\\CADCon\\build-windows.cmd",
+  "productName": "SLAI CADCon",
+  "identifier": "app.slai.cadcon",
+  "port": 47872,
+  "bundled": true
+}

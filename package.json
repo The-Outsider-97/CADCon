@@ -1,5 +1,19 @@
 {
-  "name": "cadcon", "private": true, "version": "1.0.0", "type": "module",
-  "scripts": { "build": "node tools/build.mjs", "typecheck": "tsc -p tsconfig.build.json" },
-  "devDependencies": { "typescript": "^5.7.3" }
+  "name": "cadcon",
+  "private": true,
+  "version": "1.0.0-dev",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "typecheck": "tsc -p tsconfig.build.json",
+    "tauri": "npx --yes @tauri-apps/cli@2",
+    "splash": "node ../tools/build/publish-startup.mjs src-tauri/splash",
+    "bundle": "python tools/desktop/build_bundle.py --slai-root ../..",
+    "bundle:plan": "python tools/desktop/build_bundle.py --slai-root ../.. --plan",
+    "app:dev": "npm run build && npm run splash && npm run tauri -- dev",
+    "app:build:windows": "npm run build && npm run splash && npm run bundle && npm run tauri -- build"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
 }

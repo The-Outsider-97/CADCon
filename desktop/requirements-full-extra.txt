@@ -1,0 +1,26 @@
+# Added by --profile full: everything else the SLAI source imports that can run inside a desktop program (versions from the SLAI venv).
+# Left out on purpose even here: PyQt5 (a second GUI toolkit), selenium (needs a browser driver), psycopg2/elasticsearch/kafka/boto3 (server back ends).
+torchvision==0.29.2
+einops==0.8.2
+rotary-embedding-torch==0.9.2
+sentence-transformers==6.3.0
+transformers==5.23.0
+tokenizers==0.23.3
+huggingface-hub==2.4.0
+safetensors==0.8.0
+librosa==1.0.1
+opencv-python==5.0.0.93
+matplotlib==3.11.2
+reportlab==5.1.0
+pypdf==7.1.0
+rdflib==7.6.0
+cryptography==50.0.2
+gymnasium==1.4.0
+ruptures==1.1.10
+lz4==4.4.5
+Metaphone==0.6
+deepmerge==4.0.0
+watchdog==7.1.0
+websockets==17.4
+requests==2.34.2
+fonttools==4.68.0

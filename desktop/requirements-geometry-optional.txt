@@ -1,0 +1,8 @@
+# Back ends for DXF and IFC. They are NOT in the SLAI venv, so there is no known-good version to pin; the build takes the newest Windows wheel for Python 3.13.
+# Each is installed on its own: a missing wheel is reported in the build summary and in bundle-manifest.json (and CADCon then lists the format as
+# unavailable), it never stops the build and is never replaced by a stand-in.
+#   ezdxf        MIT          DXF import/export
+#   ifcopenshell LGPL-3.0     IFC import (kept as plain replaceable files in the bundle, as the LGPL asks)
+ezdxf
+ifcopenshell
+# DWG needs Open Design Alliance's File Converter, which has its own licence and is not bundled: install it separately and set conversion.dwg_executable.

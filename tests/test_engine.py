@@ -337,3 +337,77 @@ def test_opt_in_slai_spatial_nearest(tmp_path: Path) -> None:
     assert result["entity_count"] == 2
     assert len(result["query"]["entity_ids"]) == 1
     assert result["query"]["distances"][0] == pytest.approx(0)
+
+
+# --- OBJ polygon support (regression: every quad used to be rejected by an off-by-one on the token count) ---------------------------------
+_CUBE_VERTICES = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n"
+_CUBE_QUADS = "f 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n"
+
+
+def test_obj_cube_of_quads_is_measured_exactly(tmp_path: Path) -> None:
+    source = tmp_path / "cube.obj"
+    source.write_text(_CUBE_VERTICES + _CUBE_QUADS, encoding="utf-8")
+    summary = engine.inspect(source)["geometry_summary"]
+    assert summary["polygons"] == 6 and summary["triangles"] == 12
+    assert summary["watertight"] is True and summary["boundary_edges"] == 0 and summary["nonmanifold_edges"] == 0
+    assert summary["surface_area"] == pytest.approx(6.0, rel=1e-12)
+    assert summary["volume"] == pytest.approx(1.0, rel=1e-12)
+
+
+def test_obj_quad_and_triangle_cube_agree(tmp_path: Path) -> None:
+    quads, tris = tmp_path / "quads.obj", tmp_path / "tris.obj"
+    quads.write_text(_CUBE_VERTICES + _CUBE_QUADS, encoding="utf-8")
+    split = "".join(f"f {a} {b} {c}\nf {a} {c} {d}\n" for a, b, c, d in
+                    ((1, 4, 3, 2), (5, 6, 7, 8), (1, 2, 6, 5), (2, 3, 7, 6), (3, 4, 8, 7), (4, 1, 5, 8)))
+    tris.write_text(_CUBE_VERTICES + split, encoding="utf-8")
+    assert engine.compare(quads, tris)["status"] in {"identical", "geometrically_equivalent"}
+
+
+@pytest.mark.parametrize("faces,fragment", [
+    ("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0.5\nf 1 2 3 4\n", "Non-planar"),                      # twisted quad
+    ("v 0 0 0\nv 2 0 0\nv 0.5 0.5 0\nv 0 2 0\nf 1 2 3 4\n", "Concave"),                       # dart / concave quad
+    ("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0.5 1.5 0\nv 0 1 0\nf 1 2 3 4 5\n", "more than four"),    # pentagon
+])
+def test_obj_unsafe_polygons_are_refused_not_guessed(tmp_path: Path, faces: str, fragment: str) -> None:
+    source = tmp_path / "bad.obj"
+    source.write_text(faces, encoding="utf-8")
+    with pytest.raises(engine.GeometryError, match=fragment):
+        engine.inspect(source)
+
+
+# --- failed conversions leave nothing behind and kernel limits are explained --------------------------------------------------------------
+def test_failed_conversion_removes_what_it_created_and_never_touches_existing_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "cube.obj"
+    source.write_text(_CUBE_VERTICES + _CUBE_QUADS, encoding="utf-8")
+
+    def broken_write(path: Path, content: bytes) -> None:       # the writer creates the file and then fails halfway
+        path.write_bytes(content[:10])
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine, "_safe_write", broken_write)
+    target = tmp_path / "cube.sgeo"
+    with pytest.raises(OSError):
+        engine.convert(source, target)
+    assert not target.exists()
+
+    existing = tmp_path / "keep.sgeo"
+    existing.write_bytes(b"user data")
+    with pytest.raises(engine.GeometryError, match="already exists"):
+        engine.convert(source, existing)
+    assert existing.read_bytes() == b"user data"
+
+
+def test_kernel_size_limit_is_reported_with_advice_and_leaves_no_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.utils.spatial_formats.common.errors import ResourceLimitError
+    source = tmp_path / "cube.obj"
+    source.write_text(_CUBE_VERTICES + _CUBE_QUADS, encoding="utf-8")
+
+    def refuse(path: Path, content: bytes) -> None:
+        path.write_bytes(b"partial")
+        raise ResourceLimitError("glTF decoded array budget exceeded")
+
+    monkeypatch.setattr(engine, "_safe_write", refuse)
+    target = tmp_path / "cube.sgeo"
+    with pytest.raises(engine.GeometryError, match=r"kernel size limit.*OBJ and STL"):
+        engine.convert(source, target)
+    assert not target.exists()
